@@ -282,6 +282,17 @@ class FetchersViewModel(private val container: AppContainer) : ViewModel() {
         }
     }
 
+    fun exportDnsHistoryShareUri(onReady: (Uri) -> Unit) {
+        viewModelScope.launch {
+            val json = container.repository.exportDnsHistoryJson(_dnsTestHistory.value)
+            val uri = container.repository.writeTempExportAndGetShareUri(
+                "ultimatefetcher_dns_results_${System.currentTimeMillis()}.json",
+                json
+            )
+            onReady(uri)
+        }
+    }
+
     fun startNetworkQualityTest(probeHost: String) {
         qualityJob?.cancel()
         qualityJob = viewModelScope.launch {
@@ -406,8 +417,14 @@ class FetchersViewModel(private val container: AppContainer) : ViewModel() {
         }
     }
 
-    fun deleteEndpointMonitor(id: Long) {
-        viewModelScope.launch { container.repository.deleteEndpointMonitor(id) }
+    fun deleteEndpointMonitor(context: Context, id: Long) {
+        viewModelScope.launch {
+            container.repository.deleteEndpointMonitor(id)
+            val remainingEnabled = endpointMonitors.value.any { it.id != id && it.isEnabled }
+            if (!remainingEnabled) {
+                ApiHealthCheckWorker.cancelPeriodicChecks(context)
+            }
+        }
     }
 
     fun runAllHealthChecksNow() {

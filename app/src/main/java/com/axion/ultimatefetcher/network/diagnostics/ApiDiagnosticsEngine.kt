@@ -15,13 +15,19 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.ByteArrayOutputStream
+import java.net.InetSocketAddress
+import java.net.Socket
+import java.net.URI
 import java.security.KeyStore
 import java.security.cert.X509Certificate
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.TimeZone
 import java.util.concurrent.TimeUnit
-import javax.net.ssl.SSLContext
+import javax.net.ssl.HttpsURLConnection
+import javax.net.ssl.SNIHostName
 import javax.net.ssl.SSLSocket
 import javax.net.ssl.SSLSocketFactory
 import javax.net.ssl.TrustManagerFactory
@@ -58,7 +64,7 @@ class ApiDiagnosticsEngine(
                 for (i in 0 until resp.headers.size) {
                     val name = resp.headers.name(i)
                     val value = resp.headers.value(i)
-                    headersMap[name] = value
+                    headersMap[name] = headersMap[name]?.let { "$it; $value" } ?: value
                 }
                 EndpointInspectionResult(
                     initialUrl = url,
@@ -87,6 +93,7 @@ class ApiDiagnosticsEngine(
     }
 
     suspend fun inspectSslCertificate(rawHost: String, port: Int = 443): SslCertInspectionResult = withContext(Dispatchers.IO) {
+        val safePort = port.coerceIn(1, 65535)
         val host = rawHost.trim()
             .removePrefix("https://")
             .removePrefix("http://")
@@ -94,64 +101,93 @@ class ApiDiagnosticsEngine(
             .substringBefore(":")
         if (host.isEmpty()) {
             return@withContext SslCertInspectionResult(
-                host = "", port = port, isTrusted = false, tlsProtocol = "N/A", cipherSuite = "N/A",
+                host = "", port = safePort, isTrusted = false, tlsProtocol = "N/A", cipherSuite = "N/A",
                 subject = "", issuer = "", validFrom = "", validUntil = "", daysUntilExpiry = 0,
                 sanDomains = emptyList(), chainSummary = emptyList(), validationDetail = "",
                 error = "Enter a valid hostname"
             )
         }
 
-        val fmt = SimpleDateFormat("yyyy-MM-dd HH:mm 'UTC'", Locale.US)
+        val fmt = SimpleDateFormat("yyyy-MM-dd HH:mm 'UTC'", Locale.US).apply {
+            timeZone = TimeZone.getTimeZone("UTC")
+        }
         runCatching {
             val factory = SSLSocketFactory.getDefault() as SSLSocketFactory
-            (factory.createSocket(host, port.coerceIn(1, 65535)) as SSLSocket).use { socket ->
-                socket.soTimeout = 6000
-                socket.startHandshake()
-                val session = socket.session
-                val certs = session.peerCertificates.filterIsInstance<X509Certificate>()
-                val leaf = certs.firstOrNull() ?: error("No X.509 leaf certificate presented")
+            val rawSocket = Socket()
+            try {
+                rawSocket.connect(InetSocketAddress(host, safePort), 6000)
+                rawSocket.soTimeout = 6000
+                (factory.createSocket(rawSocket, host, safePort, true) as SSLSocket).use { socket ->
+                    socket.soTimeout = 6000
+                    val params = socket.sslParameters
+                    val isIpLiteral = host.all { it.isDigit() || it == '.' || it == ':' }
+                    if (!isIpLiteral && host.contains('.')) {
+                        runCatching { params.serverNames = listOf(SNIHostName(host)) }
+                    }
+                    socket.sslParameters = params
+                    socket.startHandshake()
 
-                var trusted = true
-                var validationMsg = "Verified against Android system root trust store"
-                runCatching {
-                    val tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm())
-                    tmf.init(null as KeyStore?)
-                    val tm = tmf.trustManagers.filterIsInstance<X509TrustManager>().firstOrNull()
-                    tm?.checkServerTrusted(certs.toTypedArray(), "RSA")
-                }.onFailure { e ->
-                    trusted = false
-                    validationMsg = "Trust check note: ${e.message}"
+                    val session = socket.session
+                    val certs = session.peerCertificates.filterIsInstance<X509Certificate>()
+                    val leaf = certs.firstOrNull() ?: error("No X.509 leaf certificate presented")
+
+                    var trusted = true
+                    var validationMsg = "Verified against Android system root trust store"
+                    val hostnameOk = HttpsURLConnection.getDefaultHostnameVerifier().verify(host, session)
+                    if (!hostnameOk) {
+                        trusted = false
+                        validationMsg = "Hostname mismatch: certificate SAN/CN does not match $host"
+                    } else {
+                        val keyAlg = leaf.publicKey?.algorithm?.uppercase(Locale.US).orEmpty()
+                        val authType = when {
+                            keyAlg.contains("EC") -> "ECDHE_ECDSA"
+                            keyAlg.contains("RSA") -> "ECDHE_RSA"
+                            keyAlg.isNotBlank() -> keyAlg
+                            else -> "UNKNOWN"
+                        }
+                        runCatching {
+                            val tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm())
+                            tmf.init(null as KeyStore?)
+                            val tm = tmf.trustManagers.filterIsInstance<X509TrustManager>().firstOrNull()
+                            tm?.checkServerTrusted(certs.toTypedArray(), authType)
+                        }.onFailure { e ->
+                            trusted = false
+                            validationMsg = "Trust check note: ${e.message}"
+                        }
+                    }
+
+                    val now = Date()
+                    val daysLeft = TimeUnit.MILLISECONDS.toDays(leaf.notAfter.time - now.time)
+                    val sans = runCatching {
+                        leaf.subjectAlternativeNames?.mapNotNull { it.getOrNull(1)?.toString() }.orEmpty()
+                    }.getOrDefault(emptyList())
+
+                    val chain = certs.mapIndexed { idx, cert ->
+                        "#${idx + 1}: ${cert.subjectX500Principal.name}"
+                    }
+
+                    SslCertInspectionResult(
+                        host = host,
+                        port = safePort,
+                        isTrusted = trusted && daysLeft >= 0,
+                        tlsProtocol = session.protocol ?: "TLS",
+                        cipherSuite = session.cipherSuite ?: "Unknown",
+                        subject = leaf.subjectX500Principal.name,
+                        issuer = leaf.issuerX500Principal.name,
+                        validFrom = fmt.format(leaf.notBefore),
+                        validUntil = fmt.format(leaf.notAfter),
+                        daysUntilExpiry = daysLeft,
+                        sanDomains = sans,
+                        chainSummary = chain,
+                        validationDetail = validationMsg
+                    )
                 }
-
-                val now = Date()
-                val daysLeft = TimeUnit.MILLISECONDS.toDays(leaf.notAfter.time - now.time)
-                val sans = runCatching {
-                    leaf.subjectAlternativeNames?.mapNotNull { it.getOrNull(1)?.toString() }.orEmpty()
-                }.getOrDefault(emptyList())
-
-                val chain = certs.mapIndexed { idx, cert ->
-                    "#${idx + 1}: ${cert.subjectX500Principal.name}"
-                }
-
-                SslCertInspectionResult(
-                    host = host,
-                    port = port,
-                    isTrusted = trusted && daysLeft >= 0,
-                    tlsProtocol = session.protocol ?: "TLS",
-                    cipherSuite = session.cipherSuite ?: "Unknown",
-                    subject = leaf.subjectX500Principal.name,
-                    issuer = leaf.issuerX500Principal.name,
-                    validFrom = fmt.format(leaf.notBefore),
-                    validUntil = fmt.format(leaf.notAfter),
-                    daysUntilExpiry = daysLeft,
-                    sanDomains = sans,
-                    chainSummary = chain,
-                    validationDetail = validationMsg
-                )
+            } finally {
+                runCatching { if (!rawSocket.isClosed) rawSocket.close() }
             }
         }.getOrElse { err ->
             SslCertInspectionResult(
-                host = host, port = port, isTrusted = false, tlsProtocol = "N/A", cipherSuite = "N/A",
+                host = host, port = safePort, isTrusted = false, tlsProtocol = "N/A", cipherSuite = "N/A",
                 subject = "", issuer = "", validFrom = "", validUntil = "", daysUntilExpiry = 0,
                 sanDomains = emptyList(), chainSummary = emptyList(), validationDetail = "",
                 error = err.message ?: "TLS handshake failed"
@@ -231,12 +267,25 @@ class ApiDiagnosticsEngine(
 
         val rawSpecJson: String = if (trimmed.startsWith("{")) {
             trimmed
-        } else if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
+        } else if (trimmed.startsWith("http://", true) || trimmed.startsWith("https://", true)) {
             runCatching {
                 val req = Request.Builder().url(trimmed).get().build()
                 okHttpClient.newCall(req).execute().use { resp ->
                     if (!resp.isSuccessful) error("HTTP ${resp.code} fetching OpenAPI spec")
-                    resp.body?.string().orEmpty()
+                    val stream = resp.body?.byteStream() ?: return@use ""
+                    val out = ByteArrayOutputStream()
+                    val buf = ByteArray(8192)
+                    var total = 0
+                    while (true) {
+                        val read = stream.read(buf)
+                        if (read <= 0) break
+                        total += read
+                        if (total > MAX_OPENAPI_BYTES) {
+                            error("OpenAPI document exceeds 2 MB safety cap")
+                        }
+                        out.write(buf, 0, read)
+                    }
+                    out.toString(Charsets.UTF_8.name())
                 }
             }.getOrElse { err ->
                 return@withContext OpenApiDiscoveryResult("", "", "", emptyList(), err.message ?: "Failed to download OpenAPI spec")
@@ -259,12 +308,19 @@ class ApiDiagnosticsEngine(
                 val scheme = root.optJSONArray("schemes")?.optString(0).orEmpty().ifBlank { "https" }
                 baseUrl = "$scheme://${root.optString("host")}${root.optString("basePath")}"
             }
-            if (baseUrl.startsWith("/") && trimmed.startsWith("http")) {
-                val origin = trimmed.substringBefore("/", missingDelimiterValue = "").ifEmpty {
-                    val idx = trimmed.indexOf('/', 8)
-                    if (idx > 0) trimmed.substring(0, idx) else trimmed
+            if (baseUrl.startsWith("/") && (trimmed.startsWith("http://", true) || trimmed.startsWith("https://", true))) {
+                val origin = runCatching {
+                    val uri = URI(trimmed)
+                    if (!uri.scheme.isNullOrBlank() && !uri.host.isNullOrBlank()) {
+                        val portSuffix = if (uri.port != -1) ":${uri.port}" else ""
+                        "${uri.scheme}://${uri.host}$portSuffix"
+                    } else {
+                        ""
+                    }
+                }.getOrDefault("")
+                if (origin.isNotEmpty()) {
+                    baseUrl = origin.trimEnd('/') + baseUrl
                 }
-                baseUrl = origin.trimEnd('/') + baseUrl
             }
 
             val paths = root.optJSONObject("paths") ?: JSONObject()
@@ -275,22 +331,17 @@ class ApiDiagnosticsEngine(
             while (pathKeys.hasNext()) {
                 val path = pathKeys.next()
                 val pathObj = paths.optJSONObject(path) ?: continue
+                val sharedParams = extractParameters(pathObj.optJSONArray("parameters"))
                 val methodKeys = pathObj.keys()
                 while (methodKeys.hasNext()) {
                     val m = methodKeys.next().lowercase(Locale.US)
                     if (m !in validMethods) continue
                     val op = pathObj.optJSONObject(m) ?: continue
                     val summary = op.optString("summary").ifBlank { op.optString("description").ifBlank { "Endpoint operation" } }
-                    val paramsArr = op.optJSONArray("parameters")
-                    val params = mutableListOf<String>()
-                    if (paramsArr != null) {
-                        for (i in 0 until paramsArr.length()) {
-                            val pObj = paramsArr.optJSONObject(i) ?: continue
-                            val pName = pObj.optString("name")
-                            val pIn = pObj.optString("in")
-                            if (pName.isNotBlank()) params.add("$pName ($pIn)")
-                        }
-                    }
+                    val mergedParams = LinkedHashSet<String>().apply {
+                        addAll(sharedParams)
+                        addAll(extractParameters(op.optJSONArray("parameters")))
+                    }.toList()
                     val sampleUrl = if (baseUrl.isNotBlank()) "${baseUrl.trimEnd('/')}$path" else path
                     val sampleBody = if (m in setOf("post", "put", "patch")) "{\n  \n}" else ""
                     endpoints.add(
@@ -298,7 +349,7 @@ class ApiDiagnosticsEngine(
                             method = m.uppercase(Locale.US),
                             path = path,
                             summary = summary,
-                            parameters = params,
+                            parameters = mergedParams,
                             sampleUrl = sampleUrl,
                             sampleBody = sampleBody
                         )
@@ -315,6 +366,22 @@ class ApiDiagnosticsEngine(
         }.getOrElse { err ->
             OpenApiDiscoveryResult("", "", "", emptyList(), "Failed to parse JSON OpenAPI specification: ${err.message}")
         }
+    }
+
+    private fun extractParameters(paramsArr: JSONArray?): List<String> {
+        if (paramsArr == null) return emptyList()
+        val params = mutableListOf<String>()
+        for (i in 0 until paramsArr.length()) {
+            val pObj = paramsArr.optJSONObject(i) ?: continue
+            val pName = pObj.optString("name")
+            val pIn = pObj.optString("in")
+            if (pName.isNotBlank()) params.add("$pName ($pIn)")
+        }
+        return params
+    }
+
+    companion object {
+        private const val MAX_OPENAPI_BYTES = 2 * 1024 * 1024
     }
 
     fun computeResponseDiff(leftRaw: String, rightRaw: String): List<JsonDiffLine> {

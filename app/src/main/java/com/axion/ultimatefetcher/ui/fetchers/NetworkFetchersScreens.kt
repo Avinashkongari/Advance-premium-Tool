@@ -1,6 +1,7 @@
 package com.axion.ultimatefetcher.ui.fetchers
 
 import android.app.Activity
+import android.content.Intent
 import android.net.VpnService
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -18,6 +19,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -26,6 +28,7 @@ import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Hub
+import androidx.compose.material.icons.filled.IosShare
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
@@ -416,9 +419,13 @@ fun QuicDiagnosticTool(viewModel: FetchersViewModel) {
                     Column(modifier = Modifier.weight(1f)) {
                         Text("Filter UDP Port 443 (QUIC)", style = MaterialTheme.typography.titleMedium)
                         Text(
-                            if (settings.quicBlockingEnabled) "Active when Local VPN is running" else "Observation Only (No packets dropped)",
+                            when {
+                                settings.quicBlockingEnabled && vpnState.isRunning -> "LIVE: Filtering UDP:443 via Local VPN"
+                                settings.quicBlockingEnabled -> "Staged — start Local VPN to enforce UDP:443 filtering"
+                                else -> "Observation Only (No packets dropped)"
+                            },
                             style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = if (settings.quicBlockingEnabled && vpnState.isRunning) cyber.warning else MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                     Switch(
@@ -437,7 +444,7 @@ fun QuicDiagnosticTool(viewModel: FetchersViewModel) {
                 EmptyStateCard(Icons.Default.Block, "No QUIC (UDP:443) Traffic Logged", "Start Local VPN monitoring to detect UDP port 443 destination endpoints.")
             }
         } else {
-            items(distinctIps) { (ip, count) ->
+            items(distinctIps, key = { it.first }) { (ip, count) ->
                 CyberGlassCard(cornerRadius = 14.dp) {
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                         Column {
@@ -536,9 +543,11 @@ fun ConnectionAnalyzerTool(viewModel: FetchersViewModel) {
 
 @Composable
 fun DnsResolverTesterTool(viewModel: FetchersViewModel) {
+    val context = LocalContext.current
     val history by viewModel.dnsTestHistory.collectAsStateWithLifecycle()
     val testing by viewModel.dnsTesting.collectAsStateWithLifecycle()
     val settings by viewModel.settings.collectAsStateWithLifecycle()
+    val cyber = LocalCyberColors.current
 
     var hostname by remember { mutableStateOf("example.com") }
     var recordType by remember { mutableStateOf("A") }
@@ -550,6 +559,13 @@ fun DnsResolverTesterTool(viewModel: FetchersViewModel) {
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
         item {
+            InfoCalloutBanner(
+                title = "Direct UDP:53 Resolver & DoH/DoT Transparency",
+                message = "Sends RFC 1035 queries over UDP:53 (IPv4 or IPv6) with transaction-ID validation and RCODE decoding. Selecting System uses Android's active resolver (including DoT/Private DNS when configured).",
+                accentColor = cyber.success
+            )
+        }
+        item {
             CyberGlassCard {
                 OutlinedTextField(
                     value = hostname,
@@ -560,29 +576,49 @@ fun DnsResolverTesterTool(viewModel: FetchersViewModel) {
                 )
                 Spacer(Modifier.height(8.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.horizontalScroll(rememberScrollState())) {
-                    listOf("A", "AAAA", "MX", "TXT", "CNAME").forEach { rt ->
+                    listOf("A", "AAAA", "MX", "TXT", "CNAME", "NS", "HTTPS").forEach { rt ->
                         FilterChip(selected = recordType == rt, onClick = { recordType = rt }, label = { Text(rt) })
                     }
                 }
                 Spacer(Modifier.height(6.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.horizontalScroll(rememberScrollState())) {
-                    listOf("1.1.1.1", "8.8.8.8", "9.9.9.9", "System").forEach { srv ->
+                    listOf("1.1.1.1", "8.8.8.8", "9.9.9.9", "2606:4700:4700::1111", "System").forEach { srv ->
                         FilterChip(selected = dnsServer == srv, onClick = { dnsServer = srv }, label = { Text(srv) })
                     }
                 }
                 Spacer(Modifier.height(8.dp))
-                Button(
-                    onClick = { viewModel.runDnsLookup(hostname, recordType, dnsServer) },
-                    enabled = !testing,
-                    modifier = Modifier.fillMaxWidth().height(48.dp),
-                    shape = RoundedCornerShape(14.dp)
-                ) {
-                    if (testing) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimary)
-                    else Text("Resolve $recordType Record")
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    Button(
+                        onClick = { viewModel.runDnsLookup(hostname, recordType, dnsServer) },
+                        enabled = !testing,
+                        modifier = Modifier.weight(1f).height(48.dp),
+                        shape = RoundedCornerShape(14.dp)
+                    ) {
+                        if (testing) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimary)
+                        else Text("Resolve $recordType Record")
+                    }
+                    if (history.isNotEmpty()) {
+                        OutlinedButton(
+                            onClick = {
+                                viewModel.exportDnsHistoryShareUri { uri ->
+                                    val share = Intent(Intent.ACTION_SEND).apply {
+                                        type = "application/json"
+                                        putExtra(Intent.EXTRA_STREAM, uri)
+                                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                    }
+                                    context.startActivity(Intent.createChooser(share, "Export DNS Results"))
+                                }
+                            },
+                            modifier = Modifier.height(48.dp),
+                            shape = RoundedCornerShape(14.dp)
+                        ) {
+                            Icon(Icons.Default.IosShare, contentDescription = "Export DNS Results", modifier = Modifier.size(18.dp))
+                        }
+                    }
                 }
             }
         }
-        items(history, key = { "${it.timestamp}_${it.hostname}" }) { res ->
+        itemsIndexed(history, key = { idx, it -> "${it.timestamp}_${it.hostname}_${it.recordType}_$idx" }) { _, res ->
             CyberGlassCard(cornerRadius = 14.dp) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                     Text("${res.recordType} • ${res.hostname}", style = MaterialTheme.typography.titleSmall, fontFamily = JetBrainsMonoFamily)

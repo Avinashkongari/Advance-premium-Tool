@@ -6,12 +6,16 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
+import android.net.Network
 import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
 import androidx.core.app.NotificationCompat
+import androidx.core.app.ServiceCompat
 import com.axion.ultimatefetcher.UltimateFetcherApplication
 import com.axion.ultimatefetcher.data.database.entities.DNSLog
 import com.axion.ultimatefetcher.data.database.entities.PacketLog
@@ -49,6 +53,7 @@ class VpnMonitorService : VpnService() {
     private val quicBlockFlag = AtomicBoolean(false)
     private var selectedPackages: List<String> = emptyList()
     private var customDnsServer: String = "1.1.1.1"
+    private var underlyingNetworkCallback: ConnectivityManager.NetworkCallback? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
@@ -76,7 +81,7 @@ class VpnMonitorService : VpnService() {
 
     private fun startVpnInternal() {
         createNotificationChannel()
-        startForeground(NOTIFICATION_ID, buildNotification("Configuring local VPN monitor..."))
+        startForegroundSafe(buildNotification("Configuring local VPN monitor..."))
 
         val appContainer = (application as UltimateFetcherApplication).container
         val wasRunning = _liveState.value.isRunning
@@ -108,12 +113,15 @@ class VpnMonitorService : VpnService() {
             return
         }
 
+        val safeDns = sanitizeDnsServerIp(customDnsServer)
+        customDnsServer = safeDns
+
         val builder = Builder()
             .setSession("UltimateFetcher Local Monitor")
             .setMtu(1500)
             .addAddress("10.215.173.1", 32)
             .addRoute("0.0.0.0", 0)
-            .addDnsServer(customDnsServer)
+            .addDnsServer(safeDns)
 
         // Configure valid IPv6 address, route, and DNS (safe fallback if device disables IPv6)
         runCatching {
@@ -121,6 +129,11 @@ class VpnMonitorService : VpnService() {
                 .addAddress("fd00:1:fd00:1:fd00:1:fd00:1", 128)
                 .addRoute("::", 0)
                 .addDnsServer("2606:4700:4700::1111")
+        }
+
+        // Preserve underlying active Wi-Fi/Mobile network binding on Android 10+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            runCatching { builder.setMetered(false) }
         }
 
         // Apply per-app allowed application filtering cleanly
@@ -160,6 +173,7 @@ class VpnMonitorService : VpnService() {
         val output = FileOutputStream(tun.fileDescriptor)
         tunInputStream = input
         tunOutputStream = output
+        registerUnderlyingNetworkCallback()
 
         val scopeSummary = if (validation.validAppNames.isNotEmpty()) {
             validation.validAppNames.joinToString(", ")
@@ -287,6 +301,7 @@ class VpnMonitorService : VpnService() {
     }
 
     private fun stopCaptureAndCloseTun() {
+        unregisterUnderlyingNetworkCallback()
         pipeline?.stopAsync()
         pipeline = null
         runCatching { tunInputStream?.close() }
@@ -295,6 +310,56 @@ class VpnMonitorService : VpnService() {
         tunInputStream = null
         tunOutputStream = null
         vpnInterface = null
+    }
+
+    private fun startForegroundSafe(notification: Notification) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            ServiceCompat.startForeground(
+                this,
+                NOTIFICATION_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+            )
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
+    }
+
+    private fun sanitizeDnsServerIp(candidate: String): String {
+        val trimmed = candidate.trim()
+        val ipv4Regex = Regex("""^((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$""")
+        if (ipv4Regex.matches(trimmed)) return trimmed
+        if (trimmed.contains(':') && runCatching { InetAddress.getByName(trimmed) }.isSuccess) return trimmed
+        return "1.1.1.1"
+    }
+
+    private fun registerUnderlyingNetworkCallback() {
+        unregisterUnderlyingNetworkCallback()
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
+        val request = NetworkRequest.Builder()
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+            .build()
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                runCatching { setUnderlyingNetworks(arrayOf(network)) }
+            }
+
+            override fun onLost(network: Network) {
+                runCatching { setUnderlyingNetworks(null) }
+            }
+        }
+        runCatching {
+            cm.registerNetworkCallback(request, callback)
+            underlyingNetworkCallback = callback
+        }
+    }
+
+    private fun unregisterUnderlyingNetworkCallback() {
+        val cb = underlyingNetworkCallback ?: return
+        underlyingNetworkCallback = null
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
+        runCatching { cm.unregisterNetworkCallback(cb) }
     }
 
     private fun stopVpnInternal(clearError: Boolean) {
@@ -344,7 +409,7 @@ class VpnMonitorService : VpnService() {
 
     private fun updateNotification(statusText: String) {
         val nm = getSystemService(NotificationManager::class.java) ?: return
-        nm.notify(NOTIFICATION_ID, buildNotification(statusText))
+        runCatching { nm.notify(NOTIFICATION_ID, buildNotification(statusText)) }
     }
 
     private fun buildNotification(statusText: String): Notification {

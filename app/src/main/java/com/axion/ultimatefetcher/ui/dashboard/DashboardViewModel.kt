@@ -36,8 +36,17 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
 
     init {
         viewModelScope.launch {
-            _rootState.value = container.rootDiagnosticsEngine.checkRootAvailabilityPassive()
+            val state = container.rootDiagnosticsEngine.checkRootAvailabilityPassive()
+            _rootState.value = state
+            if (!state.isRootDetected) {
+                container.settingsDataStore.setRootModeEnabled(false)
+            }
         }
+    }
+
+    fun refreshTelemetryNow() {
+        container.telemetryMonitor.refreshNow()
+        postBanner("Refreshed live network interface, DNS, and latency telemetry.")
     }
 
     fun startVpnMonitoring(context: Context) {
@@ -111,6 +120,11 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
 
     fun toggleRootMode(enabled: Boolean) {
         viewModelScope.launch {
+            if (enabled && !_rootState.value.isRootDetected) {
+                container.settingsDataStore.setRootModeEnabled(false)
+                postBanner("Root is not detected on this device; Root Mode remains disabled.")
+                return@launch
+            }
             container.settingsDataStore.setRootModeEnabled(enabled)
             postBanner(if (enabled) "Read-only Root Mode enabled." else "Root Mode disabled.")
         }

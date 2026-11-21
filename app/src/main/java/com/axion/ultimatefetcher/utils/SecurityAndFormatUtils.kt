@@ -59,7 +59,11 @@ object SensitiveDataRedactor {
         val out = LinkedHashMap<String, String>(headers.size)
         for ((k, v) in headers) {
             out[k] = when {
-                k.equals("Set-Cookie", ignoreCase = true) -> redactSetCookiePreserveAttributes(v)
+                k.equals("Set-Cookie", ignoreCase = true) -> v
+                    .split('\n')
+                    .filter { it.isNotBlank() }
+                    .joinToString("\n") { redactSetCookiePreserveAttributes(it) }
+                    .ifBlank { "[REDACTED]" }
                 isSensitiveHeader(k) -> "[REDACTED]"
                 else -> v
             }

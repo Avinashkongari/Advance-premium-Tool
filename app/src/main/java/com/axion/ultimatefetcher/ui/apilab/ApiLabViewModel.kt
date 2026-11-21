@@ -19,6 +19,8 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import org.json.JSONArray
+import org.json.JSONObject
 
 data class ApiLabUiState(
     val draft: ApiRequestDraft = ApiRequestDraft(),
@@ -99,9 +101,25 @@ class ApiLabViewModel(private val container: AppContainer) : ViewModel() {
     }
 
     fun formatRequestBodyJson() {
-        _uiState.update { s ->
-            s.copy(draft = s.draft.copy(bodyText = FormatUtils.prettyPrintJson(s.draft.bodyText)))
+        val raw = _uiState.value.draft.bodyText.trim()
+        if (raw.isEmpty()) {
+            postFeedback("Enter JSON text before formatting.")
+            return
         }
+        val formatted = runCatching {
+            when {
+                raw.startsWith("{") -> JSONObject(raw).toString(2)
+                raw.startsWith("[") -> JSONArray(raw).toString(2)
+                else -> error("Must start with '{' or '['")
+            }
+        }.getOrElse { err ->
+            postFeedback("Invalid JSON: ${err.message ?: "syntax error"}")
+            return
+        }
+        _uiState.update { s ->
+            s.copy(draft = s.draft.copy(bodyText = formatted))
+        }
+        postFeedback("JSON payload formatted.")
     }
 
     fun addFormField() {
@@ -197,6 +215,45 @@ class ApiLabViewModel(private val container: AppContainer) : ViewModel() {
             )
         }
         postFeedback("Loaded $method endpoint into API Lab.")
+    }
+
+    fun loadCollectionItem(obj: JSONObject) {
+        val method = obj.optString("method", "GET").uppercase()
+        val url = obj.optString("url", "")
+        val bodyText = obj.optString("bodyText", "")
+        val bodyType = obj.optString("bodyType", if (bodyText.isNotBlank()) "JSON" else "NONE")
+        val queryParams = parseKvArray(obj.optJSONArray("queryParams"))
+        val headers = parseKvArray(obj.optJSONArray("headers"))
+            .ifEmpty { listOf(KeyValuePair("Accept", "application/json", true)) }
+        val formFields = parseKvArray(obj.optJSONArray("formFields"))
+
+        _uiState.update { s ->
+            s.copy(
+                draft = ApiRequestDraft(
+                    method = method,
+                    url = url,
+                    queryParams = queryParams,
+                    headers = headers,
+                    bodyType = bodyType,
+                    bodyText = bodyText,
+                    formFields = formFields
+                )
+            )
+        }
+        postFeedback("Loaded saved $method request into API Lab.")
+    }
+
+    private fun parseKvArray(arr: JSONArray?): List<KeyValuePair> {
+        if (arr == null) return emptyList()
+        val list = mutableListOf<KeyValuePair>()
+        for (i in 0 until arr.length()) {
+            val item = arr.optJSONObject(i) ?: continue
+            val k = item.optString("key", "")
+            val v = item.optString("value", "")
+            val enabled = item.optBoolean("enabled", true)
+            if (k.isNotBlank()) list.add(KeyValuePair(k, v, enabled))
+        }
+        return list
     }
 
     fun saveCurrentToCollection(name: String, description: String) {

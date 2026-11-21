@@ -5,6 +5,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import com.axion.ultimatefetcher.UltimateFetcherApplication
 import com.axion.ultimatefetcher.ui.UltimateFetcherApp
 
 class MainActivity : ComponentActivity() {
@@ -17,5 +18,15 @@ class MainActivity : ComponentActivity() {
         setContent {
             UltimateFetcherApp()
         }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        (application as? UltimateFetcherApplication)?.container?.telemetryMonitor?.start()
+    }
+
+    override fun onStop() {
+        super.onStop()
+        (application as? UltimateFetcherApplication)?.container?.telemetryMonitor?.stop()
     }
 }

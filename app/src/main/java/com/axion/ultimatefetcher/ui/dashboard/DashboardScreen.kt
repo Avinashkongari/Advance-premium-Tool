@@ -35,6 +35,7 @@ import androidx.compose.material.icons.filled.IosShare
 import androidx.compose.material.icons.filled.Lan
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Public
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Router
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Shield
@@ -46,6 +47,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -142,7 +144,7 @@ fun DashboardScreen(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column {
+                    Column(modifier = Modifier.weight(1f)) {
                         Text(
                             text = "UltimateFetcher",
                             style = MaterialTheme.typography.headlineMedium,
@@ -154,18 +156,33 @@ fun DashboardScreen(
                             color = cs.onSurfaceVariant
                         )
                     }
-                    val heroLabel = when {
-                        vpnState.isActivelyCapturing && vpnState.packetsSavedToDb > 0L -> "CAPTURING"
-                        vpnState.vpnInterfaceEstablished -> "VPN WAITING (0 PKTS)"
-                        vpnState.lastError != null && !vpnState.isRunning -> "VPN ERROR"
-                        telemetry.isConnected -> "ONLINE"
-                        else -> "OFFLINE"
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        val heroLabel = when {
+                            vpnState.isActivelyCapturing && vpnState.packetsSavedToDb > 0L -> "CAPTURING"
+                            vpnState.vpnInterfaceEstablished -> "VPN WAITING (0 PKTS)"
+                            vpnState.lastError != null && !vpnState.isRunning -> "VPN ERROR"
+                            telemetry.isConnected -> "ONLINE"
+                            else -> "OFFLINE"
+                        }
+                        LivePulseIndicator(
+                            isActive = vpnState.isActivelyCapturing || (!vpnState.isRunning && telemetry.isConnected && vpnState.lastError == null),
+                            activeLabel = heroLabel,
+                            inactiveLabel = heroLabel
+                        )
+                        IconButton(
+                            onClick = { viewModel.refreshTelemetryNow() },
+                            modifier = Modifier.testTag("dashboard_refresh")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Refresh,
+                                contentDescription = "Refresh Telemetry",
+                                tint = cyber.cyan
+                            )
+                        }
                     }
-                    LivePulseIndicator(
-                        isActive = vpnState.isActivelyCapturing || (!vpnState.isRunning && telemetry.isConnected && vpnState.lastError == null),
-                        activeLabel = heroLabel,
-                        inactiveLabel = heroLabel
-                    )
                 }
             }
 
@@ -352,12 +369,13 @@ fun DashboardScreen(
                     Spacer(Modifier.height(12.dp))
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         PacketStatChip("TOTAL", telemetry.totalPackets.toString(), cs.onSurface, Modifier.weight(1f))
                         PacketStatChip("TCP", telemetry.tcpPackets.toString(), cs.primary, Modifier.weight(1f))
                         PacketStatChip("UDP", telemetry.udpPackets.toString(), cyber.cyan, Modifier.weight(1f))
-                        PacketStatChip("QUIC BLK", telemetry.quicBlockedPackets.toString(), cyber.warning, Modifier.weight(1f))
+                        PacketStatChip("DNS", telemetry.dnsPackets.toString(), cyber.success, Modifier.weight(1f))
+                        PacketStatChip("QUIC", telemetry.quicBlockedPackets.toString(), cyber.warning, Modifier.weight(1f))
                     }
                     Spacer(Modifier.height(12.dp))
                     val totalProto = (telemetry.tcpPackets + telemetry.udpPackets).coerceAtLeast(1L)

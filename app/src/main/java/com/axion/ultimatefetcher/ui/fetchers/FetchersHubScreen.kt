@@ -45,6 +45,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -66,9 +67,15 @@ import com.axion.ultimatefetcher.ui.theme.LocalCyberColors
 fun FetchersScreen(
     viewModel: FetchersViewModel,
     onOpenInApiLab: (method: String, url: String, body: String) -> Unit,
+    resetTrigger: Int = 0,
     modifier: Modifier = Modifier
 ) {
     var selectedToolName by rememberSaveable { mutableStateOf<String?>(null) }
+    LaunchedEffect(resetTrigger) {
+        if (resetTrigger > 0) {
+            selectedToolName = null
+        }
+    }
     val activeTool = selectedToolName?.let { runCatching { FetcherToolId.valueOf(it) }.getOrNull() }
 
     if (activeTool != null) {

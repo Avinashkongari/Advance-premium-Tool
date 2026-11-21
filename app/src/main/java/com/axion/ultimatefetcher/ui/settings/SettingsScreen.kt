@@ -1,9 +1,13 @@
 package com.axion.ultimatefetcher.ui.settings
 
+import android.Manifest
 import android.app.Activity
+import android.content.pm.PackageManager
 import android.net.VpnService
+import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -69,6 +73,12 @@ fun SettingsScreen(
         contract = ActivityResultContracts.StartActivityForResult()
     ) { res ->
         vpnPermGranted = res.resultCode == Activity.RESULT_OK || VpnService.prepare(context) == null
+    }
+
+    val notifPermLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        viewModel.setHealthMonitorNotifications(granted)
     }
 
     Box(modifier = modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
@@ -186,7 +196,16 @@ fun SettingsScreen(
                         title = "API Health Failure Notifications",
                         subtitle = "Notify locally when a monitored endpoint goes offline",
                         checked = settings.healthMonitorNotifications,
-                        onCheckedChange = { viewModel.setHealthMonitorNotifications(it) }
+                        onCheckedChange = { enable ->
+                            if (enable && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                                ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS)
+                                != PackageManager.PERMISSION_GRANTED
+                            ) {
+                                notifPermLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                            } else {
+                                viewModel.setHealthMonitorNotifications(enable)
+                            }
+                        }
                     )
                 }
             }
@@ -208,7 +227,7 @@ fun SettingsScreen(
                             singleLine = true,
                             modifier = Modifier.weight(1f)
                         )
-                        Button(onClick = { viewModel.setCustomDns(dnsInput) }) {
+                        Button(onClick = { viewModel.setCustomDns(dnsInput, context) }) {
                             Text("Apply")
                         }
                     }
@@ -219,7 +238,7 @@ fun SettingsScreen(
                                 selected = settings.customDnsServer == preset,
                                 onClick = {
                                     dnsInput = preset
-                                    viewModel.setCustomDns(preset)
+                                    viewModel.setCustomDns(preset, context)
                                 },
                                 label = { Text(preset) }
                             )

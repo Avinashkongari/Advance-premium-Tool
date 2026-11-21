@@ -36,6 +36,8 @@ import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Send
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
@@ -64,6 +66,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -510,7 +514,7 @@ fun ApiLabScreen(
                                             Text(u, style = MaterialTheme.typography.labelMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                         }
                                         TextButton(onClick = {
-                                            viewModel.loadDraftFromExternal(m, u, b)
+                                            viewModel.loadCollectionItem(obj)
                                             editorTab = 0
                                         }) {
                                             Text("Load")
@@ -654,6 +658,7 @@ fun ApiLabScreen(
         var credName by remember { mutableStateOf("") }
         var headerName by remember { mutableStateOf("Authorization") }
         var secretVal by remember { mutableStateOf("") }
+        var showSecret by remember { mutableStateOf(false) }
         AlertDialog(
             onDismissRequest = { showAddCredentialDialog = false },
             title = { Text("Store Encrypted API Credential") },
@@ -677,7 +682,16 @@ fun ApiLabScreen(
                         onValueChange = { secretVal = it },
                         label = { Text("Secret Value (Encrypted via KeyStore)") },
                         placeholder = { Text("Bearer ...") },
-                        singleLine = true
+                        singleLine = true,
+                        visualTransformation = if (showSecret) VisualTransformation.None else PasswordVisualTransformation(),
+                        trailingIcon = {
+                            IconButton(onClick = { showSecret = !showSecret }) {
+                                Icon(
+                                    imageVector = if (showSecret) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                    contentDescription = if (showSecret) "Hide Secret" else "Show Secret"
+                                )
+                            }
+                        }
                     )
                 }
             },

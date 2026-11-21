@@ -21,6 +21,8 @@ import com.example.R
 import kotlinx.coroutines.flow.first
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import java.util.Locale
 import java.util.concurrent.TimeUnit
 
 class ApiHealthCheckWorker(
@@ -79,9 +81,11 @@ class ApiHealthCheckWorker(
             val url = monitor.url.trim().let {
                 if (it.startsWith("http://", true) || it.startsWith("https://", true)) it else "https://$it"
             }
+            val method = monitor.method.trim().uppercase(Locale.US).ifBlank { "GET" }
+            val body = if (method in setOf("POST", "PUT", "PATCH")) "".toRequestBody(null) else null
             val t0 = System.nanoTime()
             return runCatching {
-                val req = Request.Builder().url(url).method(monitor.method.uppercase(), null).build()
+                val req = Request.Builder().url(url).method(method, body).build()
                 client.newCall(req).execute().use { resp ->
                     val ms = ((System.nanoTime() - t0) / 1_000_000L).coerceAtLeast(1L)
                     monitor.copy(

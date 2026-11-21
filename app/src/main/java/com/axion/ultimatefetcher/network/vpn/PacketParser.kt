@@ -23,7 +23,8 @@ data class ParsedDnsPacket(
     val isResponse: Boolean,
     val queryName: String,
     val queryType: String,
-    val answers: List<String>
+    val answers: List<String>,
+    val rcode: Int = 0
 )
 
 data class ParsedTlsClientHello(
@@ -134,7 +135,7 @@ object PacketParser {
                 val payloadLen = (length - payloadOff).coerceAtLeast(0)
                 val label = when {
                     dstPort == 53 || srcPort == 53 -> "DNS"
-                    dstPort == 443 || srcPort == 443 -> "QUIC"
+                    (dstPort == 443 || srcPort == 443) && isLikelyQuicPayload(buf, payloadOff, payloadLen) -> "QUIC"
                     else -> "UDP"
                 }
                 ParsedPacket(ipVersion, label, "UDP", srcIp, srcPort, dstIp, dstPort, length, payloadOff, payloadLen)
@@ -148,6 +149,29 @@ object PacketParser {
                 transportOffset, (length - transportOffset).coerceAtLeast(0)
             )
         }
+    }
+
+    /**
+     * Checks RFC 9000 QUIC invariants to reduce false positives on non-QUIC UDP:443 traffic:
+     * - Fixed bit (0x40) MUST be set for both Long Header (0x80|0x40) and Short Header (0x40) packets,
+     *   except QUIC Version Negotiation packets (Long Header with version == 0).
+     * - Minimum payload size >= 4 bytes.
+     */
+    fun isLikelyQuicPayload(buf: ByteArray, offset: Int, length: Int): Boolean {
+        if (length < 4 || offset < 0 || offset + length > buf.size) return false
+        val firstByte = buf[offset].toInt() and 0xFF
+        val hasFixedBit = (firstByte and 0x40) != 0
+        if (hasFixedBit) return true
+        // Version Negotiation packet: Long header (0x80) with 4-byte version == 0x00000000
+        val isLongHeader = (firstByte and 0x80) != 0
+        if (isLongHeader && length >= 7) {
+            val v0 = buf[offset + 1].toInt() and 0xFF
+            val v1 = buf[offset + 2].toInt() and 0xFF
+            val v2 = buf[offset + 3].toInt() and 0xFF
+            val v3 = buf[offset + 4].toInt() and 0xFF
+            if (v0 == 0 && v1 == 0 && v2 == 0 && v3 == 0) return true
+        }
+        return false
     }
 
     /**
@@ -313,10 +337,12 @@ object PacketParser {
 
         val qType = when (recordType.uppercase()) {
             "A" -> 1
+            "NS" -> 2
             "CNAME" -> 5
             "MX" -> 15
             "TXT" -> 16
             "AAAA" -> 28
+            "HTTPS" -> 65
             else -> 1
         }
         out.write((qType ushr 8) and 0xFF)
@@ -330,9 +356,23 @@ object PacketParser {
         val txId = readU16(buf, offset)
         val flags = readU16(buf, offset + 2)
         val isResponse = (flags and 0x8000) != 0
+        val rcode = flags and 0x000F
         val qdCount = readU16(buf, offset + 4)
         val anCount = readU16(buf, offset + 6)
-        if (qdCount <= 0) return null
+        if (qdCount <= 0) {
+            return if (isResponse) {
+                ParsedDnsPacket(
+                    transactionId = txId,
+                    isResponse = true,
+                    queryName = "",
+                    queryType = "",
+                    answers = emptyList(),
+                    rcode = rcode
+                )
+            } else {
+                null
+            }
+        }
 
         val end = offset + length
         val (qName, nextPos) = readDnsName(buf, offset, offset + 12, end) ?: return null
@@ -362,10 +402,10 @@ object PacketParser {
                     1 -> if (rdLength == 4) {
                         "${buf[rdataStart].toInt() and 0xFF}.${buf[rdataStart + 1].toInt() and 0xFF}.${buf[rdataStart + 2].toInt() and 0xFF}.${buf[rdataStart + 3].toInt() and 0xFF}"
                     } else null
+                    2, 5 -> readDnsName(buf, offset, rdataStart, end)?.first
                     28 -> if (rdLength == 16) {
                         runCatching { InetAddress.getByAddress(buf.copyOfRange(rdataStart, rdataStart + 16)).hostAddress }.getOrNull()
                     } else null
-                    5 -> readDnsName(buf, offset, rdataStart, end)?.first
                     15 -> if (rdLength > 2) {
                         val pref = readU16(buf, rdataStart)
                         val ex = readDnsName(buf, offset, rdataStart + 2, end)?.first
@@ -396,7 +436,8 @@ object PacketParser {
             isResponse = isResponse,
             queryName = qName,
             queryType = qType,
-            answers = answers
+            answers = answers,
+            rcode = rcode
         )
     }
 
@@ -451,17 +492,21 @@ object PacketParser {
 
     fun parseTlsClientHello(buf: ByteArray, offset: Int, length: Int): ParsedTlsClientHello? {
         if (length < 43 || offset < 0 || offset + length > buf.size) return null
-        val end = offset + length
+        val maxEnd = offset + length
         if ((buf[offset].toInt() and 0xFF) != 0x16) return null
         val recordVerMajor = buf[offset + 1].toInt() and 0xFF
         val recordVerMinor = buf[offset + 2].toInt() and 0xFF
-        if (recordVerMajor != 0x03) return null
+        if (recordVerMajor != 0x03 || recordVerMinor > 0x04) return null
+        val recordLen = readU16(buf, offset + 3)
+        if (recordLen < 38) return null
+        val end = (offset + 5 + recordLen).coerceAtMost(maxEnd)
         if ((buf[offset + 5].toInt() and 0xFF) != 0x01) return null
 
         var pos = offset + 9
         if (pos + 34 > end) return null
         val chMajor = buf[pos].toInt() and 0xFF
         val chMinor = buf[pos + 1].toInt() and 0xFF
+        if (chMajor != 0x03) return null
         pos += 2 + 32
 
         if (pos >= end) return null
@@ -470,6 +515,7 @@ object PacketParser {
         if (pos + 2 > end) return null
 
         val cipherSuitesLen = readU16(buf, pos)
+        if (cipherSuitesLen == 0 || cipherSuitesLen % 2 != 0) return null
         pos += 2 + cipherSuitesLen
         if (pos >= end) return null
 
@@ -497,8 +543,11 @@ object PacketParser {
                     if (extLen >= 5) {
                         val nameType = buf[pos + 2].toInt() and 0xFF
                         val nameLen = readU16(buf, pos + 3)
-                        if (nameType == 0 && pos + 5 + nameLen <= pos + extLen) {
-                            sni = String(buf, pos + 5, nameLen, Charsets.US_ASCII)
+                        if (nameType == 0 && nameLen in 1..253 && pos + 5 + nameLen <= pos + extLen) {
+                            val candidate = String(buf, pos + 5, nameLen, Charsets.US_ASCII)
+                            if (isValidHostnameChars(candidate)) {
+                                sni = candidate
+                            }
                         }
                     }
                 }
@@ -510,8 +559,11 @@ object PacketParser {
                         while (p < listEnd) {
                             val protoLen = buf[p].toInt() and 0xFF
                             p++
-                            if (p + protoLen > listEnd) break
-                            alpn.add(String(buf, p, protoLen, Charsets.US_ASCII))
+                            if (protoLen <= 0 || p + protoLen > listEnd) break
+                            val proto = String(buf, p, protoLen, Charsets.US_ASCII)
+                            if (proto.all { it.code in 0x20..0x7E }) {
+                                alpn.add(proto)
+                            }
                             p += protoLen
                         }
                     }
@@ -548,6 +600,11 @@ object PacketParser {
         major == 3 && minor == 1 -> "TLS 1.0"
         recordMinor == 3 -> "TLS 1.2"
         else -> "TLS"
+    }
+
+    private fun isValidHostnameChars(name: String): Boolean {
+        if (name.isBlank() || name.startsWith('.') || name.endsWith('.')) return false
+        return name.all { ch -> ch in 'a'..'z' || ch in 'A'..'Z' || ch in '0'..'9' || ch == '.' || ch == '-' || ch == '_' }
     }
 
     private fun readU16(buf: ByteArray, offset: Int): Int {

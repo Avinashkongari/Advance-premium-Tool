@@ -40,7 +40,11 @@ class AppContainer(context: Context) {
         .addInterceptor(ownAppDebugInterceptor)
         .build()
 
-    val telemetryMonitor: LiveNetworkTelemetryMonitor = LiveNetworkTelemetryMonitor(appContext, okHttpClient)
+    val telemetryMonitor: LiveNetworkTelemetryMonitor = LiveNetworkTelemetryMonitor(
+        context = appContext,
+        okHttpClient = okHttpClient,
+        distinctEndpointsCounter = { since -> database.packetLogDao().countDistinctEndpointsSince(since) }
+    )
     val dnsResolverEngine: DnsResolverEngine = DnsResolverEngine()
     val networkQualityEngine: NetworkQualityEngine = NetworkQualityEngine(okHttpClient)
     val apiDiagnosticsEngine: ApiDiagnosticsEngine = ApiDiagnosticsEngine(okHttpClient)

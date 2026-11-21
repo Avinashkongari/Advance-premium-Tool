@@ -29,6 +29,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -260,7 +261,8 @@ fun LiveTrafficChart(
     val ulColor = cs.primary
     val gridColor = cyber.cardBorder.copy(alpha = 0.65f)
 
-    val maxBps = (samples.maxOfOrNull { maxOf(it.downloadBps, it.uploadBps) } ?: 0L).coerceAtLeast(1024L)
+    val actualPeakBps = samples.maxOfOrNull { maxOf(it.downloadBps, it.uploadBps) } ?: 0L
+    val scaleMaxBps = actualPeakBps.coerceAtLeast(1024L)
 
     Column(modifier = modifier.fillMaxWidth()) {
         Row(
@@ -271,7 +273,7 @@ fun LiveTrafficChart(
                 Text("● Download", style = MaterialTheme.typography.labelSmall, color = dlColor)
                 Text("● Upload", style = MaterialTheme.typography.labelSmall, color = ulColor)
             }
-            Text("Peak: ${FormatUtils.formatSpeed(maxBps)}", style = MaterialTheme.typography.labelSmall, color = cs.onSurfaceVariant)
+            Text("Peak: ${FormatUtils.formatSpeed(actualPeakBps)}", style = MaterialTheme.typography.labelSmall, color = cs.onSurfaceVariant)
         }
         Spacer(Modifier.height(8.dp))
         Box(
@@ -301,8 +303,8 @@ fun LiveTrafficChart(
 
                 samples.forEachIndexed { idx, s ->
                     val x = idx * stepX
-                    val yDl = h - (s.downloadBps.toFloat() / maxBps.toFloat()).coerceIn(0f, 1f) * (h - 6f) - 3f
-                    val yUl = h - (s.uploadBps.toFloat() / maxBps.toFloat()).coerceIn(0f, 1f) * (h - 6f) - 3f
+                    val yDl = h - (s.downloadBps.toFloat() / scaleMaxBps.toFloat()).coerceIn(0f, 1f) * (h - 6f) - 3f
+                    val yUl = h - (s.uploadBps.toFloat() / scaleMaxBps.toFloat()).coerceIn(0f, 1f) * (h - 6f) - 3f
                     if (idx == 0) {
                         dlPath.moveTo(x, yDl)
                         dlFill.moveTo(x, h)
@@ -433,30 +435,35 @@ fun highlightJson(json: String): AnnotatedString {
     val boolNullColor = cyber.violet
     val punctColor = cs.onSurfaceVariant
 
-    val regex = Regex(""""(\\.|[^"\\])*"\s*:|"(\\.|[^"\\])*"|\b(true|false|null)\b|-?\d+(\.\d+)?([eE][+-]?\d+)?""")
-    return buildAnnotatedString {
-        var lastEnd = 0
-        for (match in regex.findAll(json)) {
-            if (match.range.first > lastEnd) {
-                withStyle(SpanStyle(color = punctColor)) {
-                    append(json.substring(lastEnd, match.range.first))
-                }
-            }
-            val token = match.value
-            val color = when {
-                token.endsWith(":") -> keyColor
-                token.startsWith("\"") -> stringColor
-                token == "true" || token == "false" || token == "null" -> boolNullColor
-                else -> numberColor
-            }
-            withStyle(SpanStyle(color = color)) {
-                append(token)
-            }
-            lastEnd = match.range.last + 1
+    return remember(json, cyber.isDark) {
+        if (json.length > 25_000) {
+            return@remember AnnotatedString(json)
         }
-        if (lastEnd < json.length) {
-            withStyle(SpanStyle(color = punctColor)) {
-                append(json.substring(lastEnd))
+        val regex = Regex(""""(\\.|[^"\\])*"\s*:|"(\\.|[^"\\])*"|\b(true|false|null)\b|-?\d+(\.\d+)?([eE][+-]?\d+)?""")
+        buildAnnotatedString {
+            var lastEnd = 0
+            for (match in regex.findAll(json)) {
+                if (match.range.first > lastEnd) {
+                    withStyle(SpanStyle(color = punctColor)) {
+                        append(json.substring(lastEnd, match.range.first))
+                    }
+                }
+                val token = match.value
+                val color = when {
+                    token.endsWith(":") -> keyColor
+                    token.startsWith("\"") -> stringColor
+                    token == "true" || token == "false" || token == "null" -> boolNullColor
+                    else -> numberColor
+                }
+                withStyle(SpanStyle(color = color)) {
+                    append(token)
+                }
+                lastEnd = match.range.last + 1
+            }
+            if (lastEnd < json.length) {
+                withStyle(SpanStyle(color = punctColor)) {
+                    append(json.substring(lastEnd))
+                }
             }
         }
     }

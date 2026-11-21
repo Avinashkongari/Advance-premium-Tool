@@ -11,6 +11,7 @@ import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 
 data class WebSocketUiState(
@@ -26,6 +27,10 @@ class WebSocketManager(
     private val _state = MutableStateFlow(WebSocketUiState())
     val state: StateFlow<WebSocketUiState> = _state.asStateFlow()
 
+    private val wsClient: OkHttpClient = okHttpClient.newBuilder()
+        .pingInterval(25, TimeUnit.SECONDS)
+        .build()
+
     private val idGen = AtomicLong(1L)
     @Volatile
     private var activeSocket: WebSocket? = null
@@ -38,17 +43,35 @@ class WebSocketManager(
             _state.update { it.copy(status = WebSocketStatus.ERROR, statusDetail = "URL must start with ws:// or wss://") }
             return
         }
+        val req = runCatching { Request.Builder().url(url).build() }.getOrElse { err ->
+            _state.update {
+                it.copy(
+                    status = WebSocketStatus.ERROR,
+                    statusDetail = "Invalid WebSocket URL: ${err.message ?: "malformed address"}"
+                )
+            }
+            return
+        }
+
         disconnect()
+        lastSentNano = 0L
         _state.update { it.copy(status = WebSocketStatus.CONNECTING, statusDetail = "Connecting to $url...") }
 
-        val req = Request.Builder().url(url).build()
-        activeSocket = okHttpClient.newWebSocket(req, object : WebSocketListener() {
+        activeSocket = wsClient.newWebSocket(req, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
+                if (webSocket !== activeSocket) return
                 _state.update { it.copy(status = WebSocketStatus.CONNECTED, statusDetail = "Connected (HTTP ${response.code})") }
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
-                val rtt = if (lastSentNano > 0L) ((System.nanoTime() - lastSentNano) / 1_000_000L).coerceAtLeast(1L) else null
+                if (webSocket !== activeSocket) return
+                val sent = lastSentNano
+                val rtt = if (sent > 0L) {
+                    lastSentNano = 0L
+                    ((System.nanoTime() - sent) / 1_000_000L).coerceAtLeast(1L)
+                } else {
+                    null
+                }
                 val item = WebSocketMessageItem(
                     id = idGen.getAndIncrement(),
                     direction = "RECEIVED",
@@ -64,15 +87,21 @@ class WebSocketManager(
             }
 
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                if (webSocket !== activeSocket) return
                 webSocket.close(1000, null)
-                _state.update { it.copy(status = WebSocketStatus.DISCONNECTED, statusDetail = "Closed ($code $reason)") }
+                activeSocket = null
+                _state.update { it.copy(status = WebSocketStatus.DISCONNECTED, statusDetail = "Closed ($code $reason)".trim()) }
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                if (webSocket !== activeSocket) return
+                activeSocket = null
                 _state.update { it.copy(status = WebSocketStatus.DISCONNECTED, statusDetail = "Closed ($code)") }
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                if (webSocket !== activeSocket) return
+                activeSocket = null
                 _state.update { it.copy(status = WebSocketStatus.ERROR, statusDetail = "Error: ${t.message ?: "Connection failed"}") }
             }
         })
@@ -93,8 +122,10 @@ class WebSocketManager(
     }
 
     fun disconnect() {
-        runCatching { activeSocket?.close(1000, "User disconnected") }
+        val old = activeSocket
         activeSocket = null
+        lastSentNano = 0L
+        runCatching { old?.close(1000, "User disconnected") }
         _state.update { it.copy(status = WebSocketStatus.DISCONNECTED, statusDetail = "Disconnected") }
     }
 

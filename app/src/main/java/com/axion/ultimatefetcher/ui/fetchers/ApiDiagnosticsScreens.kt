@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
@@ -27,6 +28,7 @@ import androidx.compose.material.icons.filled.Send
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -262,7 +264,7 @@ fun OpenApiDiscoveryTool(
                         Text("Base: ${r.baseUrl} • ${r.endpoints.size} endpoints", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
-                items(r.endpoints.take(60)) { ep ->
+                itemsIndexed(r.endpoints.take(60), key = { idx, ep -> "${ep.method}_${ep.path}_$idx" }) { _, ep ->
                     CyberGlassCard(cornerRadius = 14.dp) {
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
@@ -447,7 +449,7 @@ fun ApiResponseDiffTool(viewModel: FetchersViewModel) {
                 }
             }
         }
-        items(lines) { diff ->
+        itemsIndexed(lines, key = { idx, diff -> "${diff.path}_$idx" }) { _, diff ->
             val (prefix, color) = when (diff.type) {
                 DiffType.ADDED -> "+ ADDED" to cyber.success
                 DiffType.REMOVED -> "- REMOVED" to MaterialTheme.colorScheme.error
@@ -498,11 +500,11 @@ fun ApiHealthMonitorTool(viewModel: FetchersViewModel) {
                         Text(m.url, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     Switch(checked = m.isEnabled, onCheckedChange = { viewModel.toggleEndpointMonitor(context, m) })
-                    IconButton(onClick = { viewModel.deleteEndpointMonitor(m.id) }) {
+                    IconButton(onClick = { viewModel.deleteEndpointMonitor(context, m.id) }) {
                         Icon(Icons.Default.Delete, contentDescription = "Delete", tint = MaterialTheme.colorScheme.error)
                     }
                 }
-                KeyValueRow("Last Status", if (m.lastCheckedAt == 0L) "Not checked yet" else "HTTP ${m.lastStatusCode} (${m.lastLatencyMs} ms)")
+                KeyValueRow("Last Status", if (m.lastCheckedAt == 0L) "Not checked yet" else "${m.method} • HTTP ${m.lastStatusCode} (${m.lastLatencyMs} ms)")
                 KeyValueRow("Schedule", "WorkManager every ${m.intervalMinutes} min")
                 KeyValueRow("Last Checked", FormatUtils.formatDateTime(m.lastCheckedAt))
             }
@@ -512,6 +514,8 @@ fun ApiHealthMonitorTool(viewModel: FetchersViewModel) {
     if (showAdd) {
         var name by remember { mutableStateOf("") }
         var url by remember { mutableStateOf("https://httpbin.org/status/200") }
+        var method by remember { mutableStateOf("GET") }
+        var intervalMin by remember { mutableStateOf(15) }
         AlertDialog(
             onDismissRequest = { showAdd = false },
             title = { Text("Add Monitored Endpoint") },
@@ -519,11 +523,23 @@ fun ApiHealthMonitorTool(viewModel: FetchersViewModel) {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text("Display Name") }, singleLine = true)
                     OutlinedTextField(value = url, onValueChange = { url = it }, label = { Text("Endpoint URL") }, singleLine = true)
+                    Text("HTTP Method", style = MaterialTheme.typography.labelSmall)
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        listOf("GET", "HEAD", "POST").forEach { mOpt ->
+                            FilterChip(selected = method == mOpt, onClick = { method = mOpt }, label = { Text(mOpt) })
+                        }
+                    }
+                    Text("Check Interval", style = MaterialTheme.typography.labelSmall)
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        listOf(15, 30, 60).forEach { mins ->
+                            FilterChip(selected = intervalMin == mins, onClick = { intervalMin = mins }, label = { Text("${mins}m") })
+                        }
+                    }
                 }
             },
             confirmButton = {
                 Button(onClick = {
-                    viewModel.addEndpointMonitor(context, name, url, "GET", 15)
+                    viewModel.addEndpointMonitor(context, name, url, method, intervalMin)
                     showAdd = false
                 }) { Text("Add & Schedule") }
             },

@@ -14,9 +14,11 @@ import com.axion.ultimatefetcher.data.database.entities.RootAuditLog
 import com.axion.ultimatefetcher.data.database.entities.SavedCollection
 import com.axion.ultimatefetcher.data.database.entities.TLSLog
 import com.axion.ultimatefetcher.domain.models.ApiRequestDraft
+import com.axion.ultimatefetcher.domain.models.DnsResolveResult
 import com.axion.ultimatefetcher.domain.models.InstalledAppInfo
 import com.axion.ultimatefetcher.domain.models.LiveNetworkTelemetry
 import com.axion.ultimatefetcher.utils.FormatUtils
+import com.axion.ultimatefetcher.utils.SensitiveDataRedactor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.withContext
@@ -125,6 +127,35 @@ class UltimateFetcherRepository(
             put("url", draft.url)
             put("bodyType", draft.bodyType)
             put("bodyText", draft.bodyText)
+            val qArr = JSONArray()
+            draft.queryParams.filter { it.key.isNotBlank() }.forEach { kv ->
+                qArr.put(JSONObject().apply {
+                    put("key", kv.key.trim())
+                    put("value", kv.value)
+                    put("enabled", kv.enabled)
+                })
+            }
+            put("queryParams", qArr)
+            val hArr = JSONArray()
+            draft.headers.filter { it.key.isNotBlank() }.forEach { kv ->
+                val cleanKey = kv.key.trim()
+                val safeVal = if (SensitiveDataRedactor.isSensitiveHeader(cleanKey)) "" else kv.value
+                hArr.put(JSONObject().apply {
+                    put("key", cleanKey)
+                    put("value", safeVal)
+                    put("enabled", kv.enabled)
+                })
+            }
+            put("headers", hArr)
+            val fArr = JSONArray()
+            draft.formFields.filter { it.key.isNotBlank() }.forEach { kv ->
+                fArr.put(JSONObject().apply {
+                    put("key", kv.key.trim())
+                    put("value", kv.value)
+                    put("enabled", kv.enabled)
+                })
+            }
+            put("formFields", fArr)
         }
         arr.put(itemObj)
         val now = System.currentTimeMillis()
@@ -338,6 +369,31 @@ class UltimateFetcherRepository(
             put("apiLogs", apiArr)
         }
         root.toString(2)
+    }
+
+    fun exportDnsHistoryJson(results: List<DnsResolveResult>): String {
+        val root = JSONObject().apply {
+            put("app", "UltimateFetcher")
+            put("exportedAt", FormatUtils.formatDateTime(System.currentTimeMillis()))
+            put("count", results.size)
+            val arr = JSONArray()
+            results.forEach { r ->
+                arr.put(
+                    JSONObject().apply {
+                        put("timestamp", FormatUtils.formatDateTime(r.timestamp))
+                        put("hostname", r.hostname)
+                        put("recordType", r.recordType)
+                        put("server", r.dnsServer)
+                        put("protocolUsed", r.protocolUsed)
+                        put("latencyMs", r.latencyMs)
+                        put("records", JSONArray(r.records))
+                        put("error", r.error ?: "")
+                    }
+                )
+            }
+            put("results", arr)
+        }
+        return root.toString(2)
     }
 
     suspend fun writeTempExportAndGetShareUri(fileName: String, content: String): Uri = withContext(Dispatchers.IO) {

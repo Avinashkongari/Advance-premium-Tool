@@ -6,7 +6,9 @@ import com.axion.ultimatefetcher.domain.models.RootAvailabilityState
 import com.axion.ultimatefetcher.domain.models.RootDiagnosticResult
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.io.ByteArrayOutputStream
 import java.io.File
+import java.util.concurrent.TimeUnit
 
 enum class SafeRootDiagnosticCommand(
     val title: String,
@@ -60,8 +62,17 @@ class RootDiagnosticsEngine(
     )
 
     suspend fun checkRootAvailabilityPassive(): RootAvailabilityState = withContext(Dispatchers.IO) {
-        val foundPath = commonSuPaths.firstOrNull { path ->
-            runCatching { File(path).exists() }.getOrDefault(false)
+        val pathDirs = System.getenv("PATH")
+            ?.split(File.pathSeparator)
+            ?.filter { it.isNotBlank() }
+            ?.map { File(it, "su").path }
+            .orEmpty()
+        val candidatePaths = (commonSuPaths + pathDirs).distinct()
+        val foundPath = candidatePaths.firstOrNull { path ->
+            runCatching {
+                val f = File(path)
+                f.exists() && f.isFile
+            }.getOrDefault(false)
         }
         if (foundPath != null) {
             RootAvailabilityState(
@@ -138,15 +149,54 @@ class RootDiagnosticsEngine(
     }
 
     private fun executeSuReadOnly(command: String): Pair<Int, String> {
+        var proc: Process? = null
         return runCatching {
-            val proc = ProcessBuilder("su", "-c", command)
+            val started = ProcessBuilder("su", "-c", command)
                 .redirectErrorStream(true)
                 .start()
-            val out = proc.inputStream.bufferedReader().use { it.readText() }
-            val code = proc.waitFor()
-            code to out.trim()
+            proc = started
+
+            val outputStream = ByteArrayOutputStream()
+            var truncated = false
+            val readerThread = Thread {
+                runCatching {
+                    started.inputStream.use { input ->
+                        val buf = ByteArray(4096)
+                        while (true) {
+                            val r = input.read(buf)
+                            if (r <= 0) break
+                            val remaining = MAX_OUTPUT_BYTES - outputStream.size()
+                            if (remaining > 0) {
+                                outputStream.write(buf, 0, minOf(r, remaining))
+                            } else {
+                                truncated = true
+                            }
+                        }
+                    }
+                }
+            }.apply {
+                isDaemon = true
+                start()
+            }
+
+            val finished = started.waitFor(COMMAND_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            if (!finished) {
+                started.destroyForcibly()
+                readerThread.join(300)
+                return@runCatching -124 to "Command timed out after ${COMMAND_TIMEOUT_SECONDS}s."
+            }
+            readerThread.join(1000)
+            val text = outputStream.toString(Charsets.UTF_8.name()).trim()
+            val finalOutput = if (truncated) "$text\n\n[Output truncated at ${MAX_OUTPUT_BYTES / 1024} KB safety cap]" else text
+            started.exitValue() to finalOutput
         }.getOrElse { err ->
+            runCatching { proc?.destroyForcibly() }
             -1 to "Execution error: ${err.message}"
         }
+    }
+
+    companion object {
+        private const val COMMAND_TIMEOUT_SECONDS = 8L
+        private const val MAX_OUTPUT_BYTES = 64 * 1024
     }
 }

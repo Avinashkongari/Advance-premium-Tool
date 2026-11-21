@@ -2,9 +2,12 @@ package com.axion.ultimatefetcher.network.diagnostics
 
 import android.content.Context
 import android.net.ConnectivityManager
+import android.net.Network
 import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.net.TrafficStats
 import android.os.Build
+import android.os.SystemClock
 import com.axion.ultimatefetcher.domain.models.LiveNetworkTelemetry
 import com.axion.ultimatefetcher.domain.models.TrafficSample
 import com.axion.ultimatefetcher.network.vpn.VpnMonitorService
@@ -27,33 +30,52 @@ import java.net.Socket
 
 class LiveNetworkTelemetryMonitor(
     private val context: Context,
-    private val okHttpClient: OkHttpClient
+    private val okHttpClient: OkHttpClient,
+    private val distinctEndpointsCounter: (suspend (sinceMs: Long) -> Int)? = null
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val _telemetry = MutableStateFlow(LiveNetworkTelemetry())
     val telemetry: StateFlow<LiveNetworkTelemetry> = _telemetry.asStateFlow()
 
     private var pollingJob: Job? = null
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
+
     private var baselineRx = safeTrafficStat(TrafficStats.getTotalRxBytes())
     private var baselineTx = safeTrafficStat(TrafficStats.getTotalTxBytes())
     private var lastRx = baselineRx
     private var lastTx = baselineTx
-    private var lastTimestamp = System.currentTimeMillis()
+    private var lastElapsedMs = SystemClock.elapsedRealtime()
+    private var sessionStartWallMs = System.currentTimeMillis()
     private var tickCount = 0
 
     fun start() {
         if (pollingJob?.isActive == true) return
-        baselineRx = safeTrafficStat(TrafficStats.getTotalRxBytes())
-        baselineTx = safeTrafficStat(TrafficStats.getTotalTxBytes())
-        lastRx = baselineRx
-        lastTx = baselineTx
-        lastTimestamp = System.currentTimeMillis()
+        val curRx = safeTrafficStat(TrafficStats.getTotalRxBytes())
+        val curTx = safeTrafficStat(TrafficStats.getTotalTxBytes())
+        if (baselineRx == 0L && curRx > 0L) baselineRx = curRx
+        if (baselineTx == 0L && curTx > 0L) baselineTx = curTx
+        lastRx = curRx
+        lastTx = curTx
+        lastElapsedMs = SystemClock.elapsedRealtime()
+        registerConnectivityCallback()
 
         pollingJob = scope.launch {
             while (isActive) {
-                sampleOnce()
+                sampleOnce(forceLatencyProbe = false)
                 delay(1000L)
             }
+        }
+    }
+
+    fun stop() {
+        pollingJob?.cancel()
+        pollingJob = null
+        unregisterConnectivityCallback()
+    }
+
+    fun refreshNow() {
+        scope.launch {
+            sampleOnce(forceLatencyProbe = true)
         }
     }
 
@@ -62,16 +84,22 @@ class LiveNetworkTelemetryMonitor(
         baselineTx = safeTrafficStat(TrafficStats.getTotalTxBytes())
         lastRx = baselineRx
         lastTx = baselineTx
-        lastTimestamp = System.currentTimeMillis()
+        lastElapsedMs = SystemClock.elapsedRealtime()
+        sessionStartWallMs = System.currentTimeMillis()
         VpnMonitorService.resetSessionCounters()
         _telemetry.update {
             it.copy(
+                downloadSpeedBps = 0L,
+                uploadSpeedBps = 0L,
                 sessionDownloadedBytes = 0L,
                 sessionUploadedBytes = 0L,
+                activeConnectionsCount = 0,
                 totalPackets = 0L,
                 tcpPackets = 0L,
                 udpPackets = 0L,
+                dnsPackets = 0L,
                 quicBlockedPackets = 0L,
+                packetsSavedToDb = 0L,
                 trafficHistory = emptyList()
             )
         }
@@ -100,17 +128,50 @@ class LiveNetworkTelemetryMonitor(
         _telemetry.update { it.copy(publicIp = null, publicIpLoading = false, publicIpError = null) }
     }
 
-    private fun sampleOnce() {
-        val now = System.currentTimeMillis()
+    private fun registerConnectivityCallback() {
+        if (networkCallback != null) return
+        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
+        val req = NetworkRequest.Builder()
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            .build()
+        val cb = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                scope.launch { sampleOnce(forceLatencyProbe = true) }
+            }
+
+            override fun onLost(network: Network) {
+                scope.launch { sampleOnce(forceLatencyProbe = false) }
+            }
+
+            override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
+                scope.launch { sampleOnce(forceLatencyProbe = false) }
+            }
+        }
+        runCatching {
+            cm.registerNetworkCallback(req, cb)
+            networkCallback = cb
+        }
+    }
+
+    private fun unregisterConnectivityCallback() {
+        val cb = networkCallback ?: return
+        networkCallback = null
+        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
+        runCatching { cm.unregisterNetworkCallback(cb) }
+    }
+
+    internal suspend fun sampleOnce(forceLatencyProbe: Boolean = false) {
+        val nowWall = System.currentTimeMillis()
+        val nowElapsed = SystemClock.elapsedRealtime()
         val curRx = safeTrafficStat(TrafficStats.getTotalRxBytes())
         val curTx = safeTrafficStat(TrafficStats.getTotalTxBytes())
-        val dtSec = ((now - lastTimestamp).coerceAtLeast(100L)) / 1000.0
+        val dtSec = ((nowElapsed - lastElapsedMs).coerceAtLeast(100L)) / 1000.0
 
         val downBps = ((curRx - lastRx).coerceAtLeast(0L) / dtSec).toLong()
         val upBps = ((curTx - lastTx).coerceAtLeast(0L) / dtSec).toLong()
         lastRx = curRx
         lastTx = curTx
-        lastTimestamp = now
+        lastElapsedMs = nowElapsed
 
         val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
         val activeNet = cm?.activeNetwork
@@ -141,14 +202,24 @@ class LiveNetworkTelemetryMonitor(
         val systemVpn = caps?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true
 
         tickCount++
-        val measuredLatency = if (isConnected && (tickCount == 1 || tickCount % 5 == 0)) {
+        val measuredLatency = if (isConnected && (forceLatencyProbe || tickCount == 1 || tickCount % 5 == 0)) {
             measureTcpLatencyMs("1.1.1.1", 443)
         } else {
             _telemetry.value.latencyMs
         }
 
         val vpn = VpnMonitorService.liveState.value
-        val sample = TrafficSample(timestamp = now, downloadBps = downBps, uploadBps = upBps)
+        val counter = distinctEndpointsCounter
+        val distinctEndpoints = if (counter != null) {
+            runCatching {
+                val windowStart = maxOf(sessionStartWallMs, nowWall - 5L * 60L * 1000L)
+                counter.invoke(windowStart)
+            }.getOrDefault(0)
+        } else {
+            0
+        }
+
+        val sample = TrafficSample(timestamp = nowWall, downloadBps = downBps, uploadBps = upBps)
 
         _telemetry.update { prev ->
             prev.copy(
@@ -163,7 +234,7 @@ class LiveNetworkTelemetryMonitor(
                 privateDnsMode = privateDns,
                 vpnSystemActive = systemVpn,
                 latencyMs = if (isConnected) measuredLatency else -1L,
-                activeConnectionsCount = if (vpn.isRunning) (vpn.totalPackets.coerceAtMost(999L)).toInt() else 0,
+                activeConnectionsCount = distinctEndpoints,
                 totalPackets = vpn.packetsParsed,
                 tcpPackets = vpn.tcpPackets,
                 udpPackets = vpn.udpPackets,

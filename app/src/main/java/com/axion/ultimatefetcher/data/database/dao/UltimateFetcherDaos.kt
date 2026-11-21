@@ -23,11 +23,14 @@ interface PacketLogDao {
     @Query("SELECT * FROM packet_logs ORDER BY timestamp DESC LIMIT :limit")
     fun observeRecent(limit: Int): Flow<List<PacketLog>>
 
-    @Query("SELECT * FROM packet_logs WHERE protocol = 'QUIC' OR dstPort = 443 ORDER BY timestamp DESC LIMIT :limit")
+    @Query("SELECT * FROM packet_logs WHERE protocol = 'QUIC' OR (protocol = 'UDP' AND dstPort = 443) ORDER BY timestamp DESC LIMIT :limit")
     fun observeQuicPackets(limit: Int): Flow<List<PacketLog>>
 
     @Query("SELECT COUNT(*) FROM packet_logs WHERE isBlocked = 1")
     fun observeBlockedQuicCount(): Flow<Int>
+
+    @Query("SELECT COUNT(DISTINCT dstIp || ':' || dstPort) FROM packet_logs WHERE timestamp >= :sinceMs")
+    suspend fun countDistinctEndpointsSince(sinceMs: Long): Int
 
     @Query("SELECT * FROM packet_logs ORDER BY timestamp DESC LIMIT :limit")
     suspend fun getRecentSnapshot(limit: Int): List<PacketLog>

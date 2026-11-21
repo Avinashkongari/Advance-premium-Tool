@@ -1,18 +1,22 @@
 package com.axion.ultimatefetcher.ui.settings
 
+import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.axion.ultimatefetcher.AppContainer
 import com.axion.ultimatefetcher.data.AppThemeMode
 import com.axion.ultimatefetcher.data.UserSettings
 import com.axion.ultimatefetcher.domain.models.RootAvailabilityState
+import com.axion.ultimatefetcher.network.vpn.VpnMonitorService
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import java.net.InetAddress
 
 class SettingsViewModel(private val container: AppContainer) : ViewModel() {
 
@@ -27,7 +31,11 @@ class SettingsViewModel(private val container: AppContainer) : ViewModel() {
 
     init {
         viewModelScope.launch {
-            _rootState.value = container.rootDiagnosticsEngine.checkRootAvailabilityPassive()
+            val state = container.rootDiagnosticsEngine.checkRootAvailabilityPassive()
+            _rootState.value = state
+            if (!state.isRootDetected) {
+                container.settingsDataStore.setRootModeEnabled(false)
+            }
         }
     }
 
@@ -37,6 +45,11 @@ class SettingsViewModel(private val container: AppContainer) : ViewModel() {
 
     fun setRootMode(enabled: Boolean) {
         viewModelScope.launch {
+            if (enabled && !_rootState.value.isRootDetected) {
+                container.settingsDataStore.setRootModeEnabled(false)
+                postMessage("Root is not available on this device. Root Mode remains disabled.")
+                return@launch
+            }
             container.settingsDataStore.setRootModeEnabled(enabled)
             postMessage(if (enabled) "Read-only Root Mode enabled." else "Root Mode disabled.")
         }
@@ -61,10 +74,25 @@ class SettingsViewModel(private val container: AppContainer) : ViewModel() {
         viewModelScope.launch { container.settingsDataStore.setHealthMonitorNotifications(enabled) }
     }
 
-    fun setCustomDns(dns: String) {
+    fun setCustomDns(dns: String, context: Context? = null) {
+        val clean = dns.trim()
+        if (!isValidDnsIpOrSystem(clean)) {
+            postMessage("Invalid DNS server '$clean'. Enter a valid IPv4/IPv6 address (e.g. 1.1.1.1) or System.")
+            return
+        }
+        val normalized = if (clean.equals("System", ignoreCase = true)) "System" else clean
         viewModelScope.launch {
-            container.settingsDataStore.setCustomDnsServer(dns)
-            postMessage("Default DNS server updated to ${dns.trim().ifEmpty { "1.1.1.1" }}.")
+            container.settingsDataStore.setCustomDnsServer(normalized)
+            if (context != null) {
+                val current = container.settingsDataStore.settingsFlow.first()
+                VpnMonitorService.reconfigureIfRunning(
+                    context = context,
+                    quicBlocking = current.quicBlockingEnabled,
+                    targetAppPackages = current.selectedAppPackages,
+                    dnsServer = normalized
+                )
+            }
+            postMessage("Default DNS server updated to $normalized.")
         }
     }
 
@@ -73,11 +101,24 @@ class SettingsViewModel(private val container: AppContainer) : ViewModel() {
     }
 
     fun setLogRetentionDays(days: Int) {
-        viewModelScope.launch { container.settingsDataStore.setLogRetentionDays(days) }
+        val safeDays = days.coerceIn(1, 30)
+        viewModelScope.launch {
+            container.settingsDataStore.setLogRetentionDays(safeDays)
+            if (container.settingsDataStore.settingsFlow.first().autoClearLogs) {
+                container.repository.pruneExpiredLogs(safeDays)
+            }
+        }
     }
 
     fun setAutoClearLogs(enabled: Boolean) {
-        viewModelScope.launch { container.settingsDataStore.setAutoClearLogs(enabled) }
+        viewModelScope.launch {
+            container.settingsDataStore.setAutoClearLogs(enabled)
+            if (enabled) {
+                val days = container.settingsDataStore.settingsFlow.first().logRetentionDays
+                container.repository.pruneExpiredLogs(days)
+                postMessage("Auto-clear enabled; logs older than $days day(s) pruned.")
+            }
+        }
     }
 
     fun setExportSanitizedOnly(enabled: Boolean) {
@@ -101,6 +142,21 @@ class SettingsViewModel(private val container: AppContainer) : ViewModel() {
             _message.value = msg
             delay(3200L)
             if (_message.value == msg) _message.value = null
+        }
+    }
+
+    companion object {
+        fun isValidDnsIpOrSystem(raw: String): Boolean {
+            val t = raw.trim()
+            if (t.isEmpty()) return false
+            if (t.equals("System", ignoreCase = true)) return true
+            val isIpv4 = Regex("""^(\d{1,3}\.){3}\d{1,3}$""").matches(t) &&
+                t.split('.').all { it.toIntOrNull() in 0..255 }
+            if (isIpv4) return true
+            if (t.contains(':')) {
+                return runCatching { InetAddress.getByName(t).address.size == 16 }.getOrDefault(false)
+            }
+            return false
         }
     }
 }

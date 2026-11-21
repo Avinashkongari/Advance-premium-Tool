@@ -29,7 +29,9 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -121,7 +123,13 @@ fun UltimateFetcherApp() {
         val cs = MaterialTheme.colorScheme
         val cyber = LocalCyberColors.current
 
+        var fetchersResetTrigger by remember { mutableIntStateOf(0) }
+
         fun navigateTopLevel(route: String) {
+            if (route == AppRoutes.ROUTE_FETCHERS && currentRoute == AppRoutes.ROUTE_FETCHERS) {
+                fetchersResetTrigger++
+                return
+            }
             navController.navigate(route) {
                 popUpTo(navController.graph.findStartDestination().id) { saveState = true }
                 launchSingleTop = true
@@ -215,7 +223,8 @@ fun UltimateFetcherApp() {
                                 onOpenInApiLab = { method, url, body ->
                                     apiLabVm.loadDraftFromExternal(method, url, body)
                                     navigateTopLevel(AppRoutes.ROUTE_APILAB)
-                                }
+                                },
+                                resetTrigger = fetchersResetTrigger
                             )
                         }
                         composable(AppRoutes.ROUTE_APILAB) {
