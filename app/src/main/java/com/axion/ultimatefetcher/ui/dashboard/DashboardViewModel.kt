@@ -43,8 +43,18 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
     fun startVpnMonitoring(context: Context) {
         val s = settings.value
         sessionStartedAt = System.currentTimeMillis()
-        VpnMonitorService.start(context, s.quicBlockingEnabled, s.selectedAppPackage, s.customDnsServer)
-        postBanner("Local VPN monitor started (${s.selectedAppName}).")
+        VpnMonitorService.start(
+            context = context,
+            quicBlocking = s.quicBlockingEnabled,
+            targetAppPackages = s.selectedAppPackages,
+            dnsServer = s.customDnsServer
+        )
+        postBanner("Configuring local VPN monitor for ${s.selectedAppName}...")
+    }
+
+    fun reportVpnPermissionDenied() {
+        VpnMonitorService.reportPermissionDenied()
+        postBanner("VPN permission denied — local traffic capture cannot start without Android VPN authorization.")
     }
 
     fun stopVpnMonitoring(context: Context) {
@@ -109,7 +119,7 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
     private fun postBanner(message: String) {
         viewModelScope.launch {
             _statusBanner.value = message
-            delay(3500L)
+            delay(4000L)
             if (_statusBanner.value == message) {
                 _statusBanner.value = null
             }

@@ -9,12 +9,16 @@ import com.axion.ultimatefetcher.data.database.entities.DNSLog
 import com.axion.ultimatefetcher.data.database.entities.PacketLog
 import com.axion.ultimatefetcher.data.database.entities.RootAuditLog
 import com.axion.ultimatefetcher.data.database.entities.TLSLog
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -44,6 +48,7 @@ data class LogsFilterState(
     val pageSize: Int = 60
 )
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class LogsViewModel(private val container: AppContainer) : ViewModel() {
 
     private val _filter = MutableStateFlow(LogsFilterState())
@@ -52,16 +57,37 @@ class LogsViewModel(private val container: AppContainer) : ViewModel() {
     private val _statusMessage = MutableStateFlow<String?>(null)
     val statusMessage: StateFlow<String?> = _statusMessage.asStateFlow()
 
-    private var frozenPackets: List<PacketLog> = emptyList()
-    private var frozenDns: List<DNSLog> = emptyList()
-    private var frozenTls: List<TLSLog> = emptyList()
-    private var frozenApi: List<ApiRequestLog> = emptyList()
-    private var frozenRoot: List<RootAuditLog> = emptyList()
+    @Volatile private var frozenPackets: List<PacketLog> = emptyList()
+    @Volatile private var frozenDns: List<DNSLog> = emptyList()
+    @Volatile private var frozenTls: List<TLSLog> = emptyList()
+    @Volatile private var frozenApi: List<ApiRequestLog> = emptyList()
+    @Volatile private var frozenRoot: List<RootAuditLog> = emptyList()
 
-    val packetLogs: StateFlow<List<PacketLog>> = combine(
-        container.repository.observePackets(limit = 400),
-        _filter
-    ) { live, f ->
+    private val dbQueryLimit = _filter
+        .map { maxOf(it.pageSize * 3, 300) }
+        .distinctUntilChanged()
+
+    private val rawPacketsFlow = dbQueryLimit.flatMapLatest { limit ->
+        container.repository.observePackets(limit = limit)
+    }
+
+    private val rawDnsFlow = dbQueryLimit.flatMapLatest { limit ->
+        container.repository.observeDnsLogs(limit = limit)
+    }
+
+    private val rawTlsFlow = dbQueryLimit.flatMapLatest { limit ->
+        container.repository.observeTlsLogs(limit = limit)
+    }
+
+    private val rawApiFlow = dbQueryLimit.flatMapLatest { limit ->
+        container.repository.observeAllApiLogs(limit = limit)
+    }
+
+    private val rawRootFlow = dbQueryLimit.flatMapLatest { limit ->
+        container.repository.observeRootAuditLogs(limit = limit)
+    }
+
+    val packetLogs: StateFlow<List<PacketLog>> = combine(rawPacketsFlow, _filter) { live, f ->
         val src = if (f.isPaused) frozenPackets else live.also { frozenPackets = it }
         val cutoff = if (f.dateFilter.windowMs > 0L) System.currentTimeMillis() - f.dateFilter.windowMs else 0L
         val q = f.searchQuery.trim()
@@ -69,15 +95,14 @@ class LogsViewModel(private val container: AppContainer) : ViewModel() {
             (cutoff == 0L || p.timestamp >= cutoff) &&
                 (f.protocolFilter == "ALL" || p.protocol.equals(f.protocolFilter, ignoreCase = true)) &&
                 (q.isEmpty() || p.srcIp.contains(q, true) || p.dstIp.contains(q, true) ||
-                    p.dstPort.toString().contains(q) || p.protocol.contains(q, true) || p.metadata.contains(q, true))
+                    p.dstPort.toString().contains(q) || p.srcPort.toString().contains(q) ||
+                    p.protocol.contains(q, true) || p.appPackage.contains(q, true) ||
+                    p.metadata.contains(q, true))
         }.let { list -> if (f.ascending) list.sortedBy { it.timestamp } else list.sortedByDescending { it.timestamp } }
             .take(f.pageSize)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    val dnsLogs: StateFlow<List<DNSLog>> = combine(
-        container.repository.observeDnsLogs(limit = 300),
-        _filter
-    ) { live, f ->
+    val dnsLogs: StateFlow<List<DNSLog>> = combine(rawDnsFlow, _filter) { live, f ->
         val src = if (f.isPaused) frozenDns else live.also { frozenDns = it }
         val cutoff = if (f.dateFilter.windowMs > 0L) System.currentTimeMillis() - f.dateFilter.windowMs else 0L
         val q = f.searchQuery.trim()
@@ -88,10 +113,7 @@ class LogsViewModel(private val container: AppContainer) : ViewModel() {
             .take(f.pageSize)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    val tlsLogs: StateFlow<List<TLSLog>> = combine(
-        container.repository.observeTlsLogs(limit = 300),
-        _filter
-    ) { live, f ->
+    val tlsLogs: StateFlow<List<TLSLog>> = combine(rawTlsFlow, _filter) { live, f ->
         val src = if (f.isPaused) frozenTls else live.also { frozenTls = it }
         val cutoff = if (f.dateFilter.windowMs > 0L) System.currentTimeMillis() - f.dateFilter.windowMs else 0L
         val q = f.searchQuery.trim()
@@ -102,10 +124,7 @@ class LogsViewModel(private val container: AppContainer) : ViewModel() {
             .take(f.pageSize)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    val apiLogs: StateFlow<List<ApiRequestLog>> = combine(
-        container.repository.observeAllApiLogs(limit = 300),
-        _filter
-    ) { live, f ->
+    val apiLogs: StateFlow<List<ApiRequestLog>> = combine(rawApiFlow, _filter) { live, f ->
         val src = if (f.isPaused) frozenApi else live.also { frozenApi = it }
         val cutoff = if (f.dateFilter.windowMs > 0L) System.currentTimeMillis() - f.dateFilter.windowMs else 0L
         val q = f.searchQuery.trim()
@@ -116,10 +135,7 @@ class LogsViewModel(private val container: AppContainer) : ViewModel() {
             .take(f.pageSize)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    val rootAuditLogs: StateFlow<List<RootAuditLog>> = combine(
-        container.repository.observeRootAuditLogs(limit = 200),
-        _filter
-    ) { live, f ->
+    val rootAuditLogs: StateFlow<List<RootAuditLog>> = combine(rawRootFlow, _filter) { live, f ->
         val src = if (f.isPaused) frozenRoot else live.also { frozenRoot = it }
         val cutoff = if (f.dateFilter.windowMs > 0L) System.currentTimeMillis() - f.dateFilter.windowMs else 0L
         val q = f.searchQuery.trim()
@@ -147,19 +163,34 @@ class LogsViewModel(private val container: AppContainer) : ViewModel() {
     fun clearCurrentCategory() {
         viewModelScope.launch {
             when (_filter.value.category) {
-                LogCategory.PACKETS -> container.repository.clearPackets()
-                LogCategory.DNS -> container.repository.clearDns()
-                LogCategory.TLS -> container.repository.clearTls()
-                LogCategory.API -> container.repository.clearApiLogs()
-                LogCategory.ROOT -> container.repository.clearRootAuditLogs()
+                LogCategory.PACKETS -> {
+                    container.repository.clearPackets()
+                    frozenPackets = emptyList()
+                }
+                LogCategory.DNS -> {
+                    container.repository.clearDns()
+                    frozenDns = emptyList()
+                }
+                LogCategory.TLS -> {
+                    container.repository.clearTls()
+                    frozenTls = emptyList()
+                }
+                LogCategory.API -> {
+                    container.repository.clearApiLogs()
+                    frozenApi = emptyList()
+                }
+                LogCategory.ROOT -> {
+                    container.repository.clearRootAuditLogs()
+                    frozenRoot = emptyList()
+                }
             }
-            postStatus("Cleared ${_filter.value.category.label} logs.")
+            postStatus("Cleared ${_filter.value.category.label} logs from Room database.")
         }
     }
 
     fun exportCsvShareUri(onReady: (Uri) -> Unit) {
         viewModelScope.launch {
-            val csv = container.repository.buildPacketsCsvExport(500)
+            val csv = container.repository.buildPacketsCsvExport(1000)
             val uri = container.repository.writeTempExportAndGetShareUri(
                 "ultimatefetcher_packets_${System.currentTimeMillis()}.csv",
                 csv

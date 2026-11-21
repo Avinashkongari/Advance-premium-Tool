@@ -56,12 +56,16 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.graphics.drawable.toBitmap
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.IconButton
 import com.axion.ultimatefetcher.ui.components.CyberGlassCard
 import com.axion.ultimatefetcher.ui.components.EmptyStateCard
 import com.axion.ultimatefetcher.ui.components.InfoCalloutBanner
 import com.axion.ultimatefetcher.ui.components.KeyValueRow
 import com.axion.ultimatefetcher.ui.components.LivePulseIndicator
 import com.axion.ultimatefetcher.ui.components.ProtocolBadge
+import com.axion.ultimatefetcher.ui.components.VpnDiagnosticsPanel
 import com.axion.ultimatefetcher.ui.theme.JetBrainsMonoFamily
 import com.axion.ultimatefetcher.ui.theme.LocalCyberColors
 import com.axion.ultimatefetcher.utils.FormatUtils
@@ -75,7 +79,11 @@ fun VpnTrafficMonitorTool(viewModel: FetchersViewModel) {
     val cyber = LocalCyberColors.current
 
     val vpnLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { res ->
-        if (res.resultCode == Activity.RESULT_OK) viewModel.startVpn(context)
+        if (res.resultCode == Activity.RESULT_OK) {
+            viewModel.startVpn(context)
+        } else {
+            viewModel.reportVpnPermissionDenied()
+        }
     }
 
     LazyColumn(
@@ -85,26 +93,32 @@ fun VpnTrafficMonitorTool(viewModel: FetchersViewModel) {
     ) {
         item {
             InfoCalloutBanner(
-                title = "Local Non-Root Android VpnService",
-                message = "Creates a local TUN interface on-device to record packet metadata (IPs, ports, TCP/UDP/QUIC/DNS/TLS headers). Traffic is NEVER uploaded to external servers. Only one active VPN is allowed by Android at a time.",
+                title = "Local Non-Root Android VpnService (IPv4 + IPv6)",
+                message = "Creates a local TUN interface on-device to capture packet metadata, relay UDP:53 DNS queries asynchronously, and persist logs to Room in non-blocking batches. Traffic is NEVER uploaded to external servers.",
                 accentColor = cyber.cyan
             )
         }
         item {
-            CyberGlassCard(accentGlow = if (vpnState.isRunning) cyber.success else null) {
+            CyberGlassCard(accentGlow = if (vpnState.isActivelyCapturing) cyber.success else if (vpnState.lastError != null) MaterialTheme.colorScheme.error else null) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text("Capture Controller", style = MaterialTheme.typography.titleMedium)
-                    LivePulseIndicator(vpnState.isRunning, "ACTIVE", "STOPPED")
+                    val badgeText = when {
+                        vpnState.isActivelyCapturing -> "CAPTURING"
+                        vpnState.vpnInterfaceEstablished -> "WAITING (0 PKTS)"
+                        vpnState.lastError != null -> "ERROR"
+                        else -> "STOPPED"
+                    }
+                    LivePulseIndicator(vpnState.isActivelyCapturing, badgeText, badgeText)
                 }
                 Spacer(Modifier.height(10.dp))
-                KeyValueRow("Packets Captured", vpnState.totalPackets.toString())
-                KeyValueRow("TCP / UDP", "${vpnState.tcpPackets} / ${vpnState.udpPackets}")
+                KeyValueRow("Packets Read / Parsed / Saved", "${vpnState.packetsRead} / ${vpnState.packetsParsed} / ${vpnState.packetsSavedToDb}")
+                KeyValueRow("TCP / UDP / DNS", "${vpnState.tcpPackets} / ${vpnState.udpPackets} / ${vpnState.dnsPackets}")
                 KeyValueRow("Observed Volume", FormatUtils.formatBytes(vpnState.capturedBytes))
-                KeyValueRow("Active Scope", vpnState.targetAppPackage.ifBlank { "All device apps" })
+                KeyValueRow("Active Scope", vpnState.selectedAppsSummary)
                 Spacer(Modifier.height(10.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
                     Button(
@@ -130,6 +144,9 @@ fun VpnTrafficMonitorTool(viewModel: FetchersViewModel) {
                     }
                 }
             }
+        }
+        item {
+            VpnDiagnosticsPanel(vpnState = vpnState)
         }
         if (packets.isEmpty()) {
             item {
@@ -221,13 +238,18 @@ fun DnsQueryMonitorTool(viewModel: FetchersViewModel) {
 
 @Composable
 fun AppTrafficFilterTool(viewModel: FetchersViewModel) {
+    val context = LocalContext.current
     val apps by viewModel.installedApps.collectAsStateWithLifecycle()
     val loading by viewModel.appsLoading.collectAsStateWithLifecycle()
     val settings by viewModel.settings.collectAsStateWithLifecycle()
+    val vpnState by viewModel.vpnState.collectAsStateWithLifecycle()
     var search by remember { mutableStateOf("") }
+    var multiSelectMode by remember { mutableStateOf(true) }
     val cyber = LocalCyberColors.current
 
-    LaunchedEffect(Unit) { viewModel.loadLaunchableApps() }
+    LaunchedEffect(Unit) { viewModel.loadLaunchableApps(forceRefresh = true) }
+
+    val selectedSet = remember(settings.selectedAppPackages) { settings.selectedAppPackages.toSet() }
 
     val filtered = remember(apps, search) {
         apps.filter {
@@ -244,19 +266,55 @@ fun AppTrafficFilterTool(viewModel: FetchersViewModel) {
     ) {
         item {
             InfoCalloutBanner(
-                title = "Android Per-App VPN Filtering",
-                message = "Uses VpnService.Builder.addAllowedApplication() to isolate a single launchable app's traffic. Queries only launchable apps via Manifest <queries> (no broad QUERY_ALL_PACKAGES). Restart VPN monitor to apply filter changes.",
+                title = "Android Per-App VPN Filtering (Single or Multi-App)",
+                message = "Applies VpnService.Builder.addAllowedApplication() for every selected package. Persisted via DataStore and automatically restarts active VPN monitoring whenever your selection changes.",
                 accentColor = cyber.cyan
             )
         }
         item {
-            CyberGlassCard {
-                KeyValueRow("Active Target", settings.selectedAppName)
-                KeyValueRow("Package", settings.selectedAppPackage.ifBlank { "All Launchable Apps" })
-                if (settings.selectedAppPackage.isNotBlank()) {
-                    Spacer(Modifier.height(6.dp))
-                    OutlinedButton(onClick = { viewModel.selectTargetApp("", "All Launchable Apps") }) {
-                        Text("Clear App Filter (Monitor All)")
+            CyberGlassCard(accentGlow = if (selectedSet.isNotEmpty()) cyber.cyan else null) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Selected Apps (${selectedSet.size})", style = MaterialTheme.typography.titleMedium)
+                    IconButton(onClick = { viewModel.loadLaunchableApps(forceRefresh = true) }) {
+                        Icon(Icons.Default.Refresh, contentDescription = "Refresh Installed Apps", tint = cyber.cyan)
+                    }
+                }
+                KeyValueRow("Active Filter Scope", settings.selectedAppName)
+                KeyValueRow(
+                    "Packages",
+                    if (settings.selectedAppPackages.isEmpty()) "All Launchable Apps"
+                    else settings.selectedAppPackages.joinToString(", ")
+                )
+                if (vpnState.isRunning) {
+                    Text(
+                        "VPN is running — changing app selection automatically reconfigures allowed apps.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = cyber.success
+                    )
+                }
+                Spacer(Modifier.height(8.dp))
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    FilterChip(
+                        selected = multiSelectMode,
+                        onClick = { multiSelectMode = true },
+                        label = { Text("Multi-App") }
+                    )
+                    FilterChip(
+                        selected = !multiSelectMode,
+                        onClick = { multiSelectMode = false },
+                        label = { Text("Single-App") }
+                    )
+                    if (selectedSet.isNotEmpty()) {
+                        OutlinedButton(onClick = { viewModel.clearSelectedApps(context) }) {
+                            Text("Clear (All)")
+                        }
                     }
                 }
             }
@@ -277,12 +335,20 @@ fun AppTrafficFilterTool(viewModel: FetchersViewModel) {
             item { EmptyStateCard(Icons.Default.Apps, "No Matching Apps", "Try a different application name or package filter.") }
         } else {
             items(filtered, key = { it.packageName }) { app ->
-                val isSelected = settings.selectedAppPackage == app.packageName
+                val isSelected = app.packageName in selectedSet
                 val bitmap = remember(app.packageName) {
                     runCatching { app.icon?.toBitmap(72, 72)?.asImageBitmap() }.getOrNull()
                 }
+                val onPick = {
+                    if (multiSelectMode) {
+                        viewModel.toggleAppSelection(context, app.packageName, app.appName)
+                    } else {
+                        if (isSelected) viewModel.clearSelectedApps(context)
+                        else viewModel.selectSingleApp(context, app.packageName, app.appName)
+                    }
+                }
                 CyberGlassCard(
-                    onClick = { viewModel.selectTargetApp(app.packageName, app.appName) },
+                    onClick = onPick,
                     accentGlow = if (isSelected) cyber.success else null,
                     cornerRadius = 14.dp
                 ) {
@@ -300,7 +366,12 @@ fun AppTrafficFilterTool(viewModel: FetchersViewModel) {
                             Text(app.appName, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             Text(app.packageName, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
-                        if (isSelected) {
+                        if (multiSelectMode) {
+                            Checkbox(
+                                checked = isSelected,
+                                onCheckedChange = { onPick() }
+                            )
+                        } else if (isSelected) {
                             Icon(Icons.Default.CheckCircle, contentDescription = "Selected", tint = cyber.success)
                         }
                     }

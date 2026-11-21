@@ -5,9 +5,11 @@ import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import org.json.JSONObject
 
 private val Context.ultimateFetcherDataStore by preferencesDataStore(name = "ultimate_fetcher_settings")
 
@@ -27,11 +29,24 @@ data class UserSettings(
     val exportSanitizedOnly: Boolean = true,
     val publicIpConsentGranted: Boolean = false,
     val quicBlockingEnabled: Boolean = false,
-    val selectedAppPackage: String = "",
-    val selectedAppName: String = "All Launchable Apps",
+    val selectedAppPackages: List<String> = emptyList(),
+    val selectedAppNamesMap: Map<String, String> = emptyMap(),
     val ownAppDebugEnabled: Boolean = false,
     val healthMonitorNotifications: Boolean = true
-)
+) {
+    val selectedAppPackage: String
+        get() = selectedAppPackages.firstOrNull().orEmpty()
+
+    val selectedAppNames: List<String>
+        get() = selectedAppPackages.map { pkg -> selectedAppNamesMap[pkg]?.takeIf { it.isNotBlank() } ?: pkg }
+
+    val selectedAppName: String
+        get() = when {
+            selectedAppPackages.isEmpty() -> "All Launchable Apps"
+            selectedAppPackages.size == 1 -> selectedAppNames.first()
+            else -> selectedAppNames.joinToString(", ")
+        }
+}
 
 class SettingsDataStore(private val context: Context) {
 
@@ -45,8 +60,11 @@ class SettingsDataStore(private val context: Context) {
         val EXPORT_SANITIZED_ONLY = booleanPreferencesKey("export_sanitized_only")
         val PUBLIC_IP_CONSENT = booleanPreferencesKey("public_ip_consent")
         val QUIC_BLOCKING_ENABLED = booleanPreferencesKey("quic_blocking_enabled")
-        val SELECTED_APP_PACKAGE = stringPreferencesKey("selected_app_package")
-        val SELECTED_APP_NAME = stringPreferencesKey("selected_app_name")
+        val SELECTED_APP_PACKAGES = stringSetPreferencesKey("selected_app_packages")
+        val SELECTED_APP_NAMES_JSON = stringPreferencesKey("selected_app_names_json")
+        // Legacy single-app keys preserved for transparent migration
+        val LEGACY_SELECTED_APP_PACKAGE = stringPreferencesKey("selected_app_package")
+        val LEGACY_SELECTED_APP_NAME = stringPreferencesKey("selected_app_name")
         val OWN_APP_DEBUG_ENABLED = booleanPreferencesKey("own_app_debug_enabled")
         val HEALTH_MONITOR_NOTIFICATIONS = booleanPreferencesKey("health_monitor_notifications")
     }
@@ -54,6 +72,22 @@ class SettingsDataStore(private val context: Context) {
     val settingsFlow: Flow<UserSettings> = context.ultimateFetcherDataStore.data.map { prefs ->
         val themeStr = prefs[Keys.THEME_MODE] ?: AppThemeMode.DARK.name
         val themeMode = runCatching { AppThemeMode.valueOf(themeStr) }.getOrDefault(AppThemeMode.DARK)
+
+        val storedSet = prefs[Keys.SELECTED_APP_PACKAGES]
+        val legacyPkg = prefs[Keys.LEGACY_SELECTED_APP_PACKAGE]?.trim().orEmpty()
+        val legacyName = prefs[Keys.LEGACY_SELECTED_APP_NAME]?.trim().orEmpty()
+
+        val packages = when {
+            storedSet != null -> storedSet.map { it.trim() }.filter { it.isNotEmpty() }.sorted()
+            legacyPkg.isNotEmpty() -> listOf(legacyPkg)
+            else -> emptyList()
+        }
+
+        val namesMap = parseNamesJson(prefs[Keys.SELECTED_APP_NAMES_JSON]).toMutableMap()
+        if (legacyPkg.isNotEmpty() && legacyName.isNotEmpty() && !namesMap.containsKey(legacyPkg)) {
+            namesMap[legacyPkg] = legacyName
+        }
+
         UserSettings(
             themeMode = themeMode,
             rootModeEnabled = prefs[Keys.ROOT_MODE_ENABLED] ?: false,
@@ -64,8 +98,8 @@ class SettingsDataStore(private val context: Context) {
             exportSanitizedOnly = prefs[Keys.EXPORT_SANITIZED_ONLY] ?: true,
             publicIpConsentGranted = prefs[Keys.PUBLIC_IP_CONSENT] ?: false,
             quicBlockingEnabled = prefs[Keys.QUIC_BLOCKING_ENABLED] ?: false,
-            selectedAppPackage = prefs[Keys.SELECTED_APP_PACKAGE] ?: "",
-            selectedAppName = prefs[Keys.SELECTED_APP_NAME] ?: "All Launchable Apps",
+            selectedAppPackages = packages,
+            selectedAppNamesMap = namesMap.filterKeys { it in packages },
             ownAppDebugEnabled = prefs[Keys.OWN_APP_DEBUG_ENABLED] ?: false,
             healthMonitorNotifications = prefs[Keys.HEALTH_MONITOR_NOTIFICATIONS] ?: true
         )
@@ -108,10 +142,69 @@ class SettingsDataStore(private val context: Context) {
         context.ultimateFetcherDataStore.edit { it[Keys.QUIC_BLOCKING_ENABLED] = enabled }
     }
 
+    suspend fun setSelectedApps(apps: Map<String, String>) {
+        val cleaned = apps.entries
+            .mapNotNull { (pkg, name) ->
+                val p = pkg.trim()
+                if (p.isEmpty()) null else p to name.trim().ifEmpty { p }
+            }
+            .toMap()
+        context.ultimateFetcherDataStore.edit { prefs ->
+            prefs[Keys.SELECTED_APP_PACKAGES] = cleaned.keys.toSet()
+            prefs[Keys.SELECTED_APP_NAMES_JSON] = encodeNamesJson(cleaned)
+            prefs.remove(Keys.LEGACY_SELECTED_APP_PACKAGE)
+            prefs.remove(Keys.LEGACY_SELECTED_APP_NAME)
+        }
+    }
+
+    suspend fun toggleSelectedApp(packageName: String, appName: String): Map<String, String> {
+        val cleanPkg = packageName.trim()
+        if (cleanPkg.isEmpty()) return emptyMap()
+        var updated: Map<String, String> = emptyMap()
+        context.ultimateFetcherDataStore.edit { prefs ->
+            val currentPkgs = prefs[Keys.SELECTED_APP_PACKAGES]?.toMutableSet() ?: mutableSetOf()
+            val currentNames = parseNamesJson(prefs[Keys.SELECTED_APP_NAMES_JSON]).toMutableMap()
+            if (cleanPkg in currentPkgs) {
+                currentPkgs.remove(cleanPkg)
+                currentNames.remove(cleanPkg)
+            } else {
+                currentPkgs.add(cleanPkg)
+                currentNames[cleanPkg] = appName.trim().ifEmpty { cleanPkg }
+            }
+            val cleanedNames = currentPkgs.associateWith { p -> currentNames[p]?.ifBlank { p } ?: p }
+            prefs[Keys.SELECTED_APP_PACKAGES] = currentPkgs
+            prefs[Keys.SELECTED_APP_NAMES_JSON] = encodeNamesJson(cleanedNames)
+            prefs.remove(Keys.LEGACY_SELECTED_APP_PACKAGE)
+            prefs.remove(Keys.LEGACY_SELECTED_APP_NAME)
+            updated = cleanedNames
+        }
+        return updated
+    }
+
     suspend fun setSelectedAppFilter(packageName: String, appName: String) {
-        context.ultimateFetcherDataStore.edit {
-            it[Keys.SELECTED_APP_PACKAGE] = packageName.trim()
-            it[Keys.SELECTED_APP_NAME] = appName.trim().ifEmpty { "All Launchable Apps" }
+        val cleanPkg = packageName.trim()
+        if (cleanPkg.isEmpty()) {
+            clearSelectedApps()
+        } else {
+            setSelectedApps(mapOf(cleanPkg to appName.trim().ifEmpty { cleanPkg }))
+        }
+    }
+
+    suspend fun clearSelectedApps() {
+        setSelectedApps(emptyMap())
+    }
+
+    suspend fun pruneUnavailableApps(unavailablePackages: Collection<String>) {
+        if (unavailablePackages.isEmpty()) return
+        val toRemove = unavailablePackages.toSet()
+        context.ultimateFetcherDataStore.edit { prefs ->
+            val currentPkgs = prefs[Keys.SELECTED_APP_PACKAGES]?.toMutableSet() ?: return@edit
+            val currentNames = parseNamesJson(prefs[Keys.SELECTED_APP_NAMES_JSON]).toMutableMap()
+            currentPkgs.removeAll(toRemove)
+            toRemove.forEach { currentNames.remove(it) }
+            val cleanedNames = currentPkgs.associateWith { p -> currentNames[p]?.ifBlank { p } ?: p }
+            prefs[Keys.SELECTED_APP_PACKAGES] = currentPkgs
+            prefs[Keys.SELECTED_APP_NAMES_JSON] = encodeNamesJson(cleanedNames)
         }
     }
 
@@ -121,5 +214,25 @@ class SettingsDataStore(private val context: Context) {
 
     suspend fun setHealthMonitorNotifications(enabled: Boolean) {
         context.ultimateFetcherDataStore.edit { it[Keys.HEALTH_MONITOR_NOTIFICATIONS] = enabled }
+    }
+
+    private fun parseNamesJson(raw: String?): Map<String, String> {
+        if (raw.isNullOrBlank()) return emptyMap()
+        return runCatching {
+            val obj = JSONObject(raw)
+            val map = LinkedHashMap<String, String>()
+            val keys = obj.keys()
+            while (keys.hasNext()) {
+                val k = keys.next()
+                map[k] = obj.optString(k, k)
+            }
+            map
+        }.getOrDefault(emptyMap())
+    }
+
+    private fun encodeNamesJson(map: Map<String, String>): String {
+        val obj = JSONObject()
+        map.forEach { (k, v) -> obj.put(k, v) }
+        return obj.toString()
     }
 }

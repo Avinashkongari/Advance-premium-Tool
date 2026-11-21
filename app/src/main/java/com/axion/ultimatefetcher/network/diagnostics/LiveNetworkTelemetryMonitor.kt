@@ -164,10 +164,12 @@ class LiveNetworkTelemetryMonitor(
                 vpnSystemActive = systemVpn,
                 latencyMs = if (isConnected) measuredLatency else -1L,
                 activeConnectionsCount = if (vpn.isRunning) (vpn.totalPackets.coerceAtMost(999L)).toInt() else 0,
-                totalPackets = vpn.totalPackets,
+                totalPackets = vpn.packetsParsed,
                 tcpPackets = vpn.tcpPackets,
                 udpPackets = vpn.udpPackets,
+                dnsPackets = vpn.dnsPackets,
                 quicBlockedPackets = vpn.blockedQuicPackets,
+                packetsSavedToDb = vpn.packetsSavedToDb,
                 trafficHistory = (prev.trafficHistory + sample).takeLast(36)
             )
         }

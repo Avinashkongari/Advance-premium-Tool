@@ -183,19 +183,57 @@ class FetchersViewModel(private val container: AppContainer) : ViewModel() {
         checkRootPassive()
     }
 
-    fun loadLaunchableApps() {
-        if (_installedApps.value.isNotEmpty() || _appsLoading.value) return
+    fun loadLaunchableApps(forceRefresh: Boolean = false) {
+        if (!forceRefresh && _installedApps.value.isNotEmpty()) return
+        if (_appsLoading.value) return
         viewModelScope.launch {
             _appsLoading.value = true
-            _installedApps.value = container.repository.loadLaunchableApps()
+            val loaded = container.repository.loadLaunchableApps()
+            _installedApps.value = loaded
+            // Prune any previously selected package that has since been uninstalled
+            val installedPkgs = loaded.map { it.packageName }.toSet()
+            val stale = settings.value.selectedAppPackages.filter { it !in installedPkgs }
+            if (stale.isNotEmpty()) {
+                container.settingsDataStore.pruneUnavailableApps(stale)
+            }
             _appsLoading.value = false
         }
     }
 
-    fun selectTargetApp(packageName: String, appName: String) {
+    fun toggleAppSelection(context: Context, packageName: String, appName: String) {
         viewModelScope.launch {
-            container.settingsDataStore.setSelectedAppFilter(packageName, appName)
+            val updatedMap = container.settingsDataStore.toggleSelectedApp(packageName, appName)
+            val s = settings.value
+            VpnMonitorService.reconfigureIfRunning(
+                context = context,
+                quicBlocking = s.quicBlockingEnabled,
+                targetAppPackages = updatedMap.keys.sorted(),
+                dnsServer = s.customDnsServer
+            )
         }
+    }
+
+    fun selectSingleApp(context: Context, packageName: String, appName: String) {
+        viewModelScope.launch {
+            val pkgs = if (packageName.isBlank()) {
+                container.settingsDataStore.clearSelectedApps()
+                emptyList()
+            } else {
+                container.settingsDataStore.setSelectedAppFilter(packageName, appName)
+                listOf(packageName.trim())
+            }
+            val s = settings.value
+            VpnMonitorService.reconfigureIfRunning(
+                context = context,
+                quicBlocking = s.quicBlockingEnabled,
+                targetAppPackages = pkgs,
+                dnsServer = s.customDnsServer
+            )
+        }
+    }
+
+    fun clearSelectedApps(context: Context) {
+        selectSingleApp(context, "", "All Launchable Apps")
     }
 
     fun setQuicBlocking(context: Context, enabled: Boolean) {
@@ -207,7 +245,16 @@ class FetchersViewModel(private val container: AppContainer) : ViewModel() {
 
     fun startVpn(context: Context) {
         val s = settings.value
-        VpnMonitorService.start(context, s.quicBlockingEnabled, s.selectedAppPackage, s.customDnsServer)
+        VpnMonitorService.start(
+            context = context,
+            quicBlocking = s.quicBlockingEnabled,
+            targetAppPackages = s.selectedAppPackages,
+            dnsServer = s.customDnsServer
+        )
+    }
+
+    fun reportVpnPermissionDenied() {
+        VpnMonitorService.reportPermissionDenied()
     }
 
     fun stopVpn(context: Context) {

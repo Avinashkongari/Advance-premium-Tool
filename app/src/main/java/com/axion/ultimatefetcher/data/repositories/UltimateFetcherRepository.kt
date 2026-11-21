@@ -202,7 +202,17 @@ class UltimateFetcherRepository(
         val intent = Intent(Intent.ACTION_MAIN, null).apply {
             addCategory(Intent.CATEGORY_LAUNCHER)
         }
-        val resolved = pm.queryIntentActivities(intent, 0)
+        val resolved = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            pm.queryIntentActivities(
+                intent,
+                android.content.pm.PackageManager.ResolveInfoFlags.of(
+                    android.content.pm.PackageManager.MATCH_ALL.toLong()
+                )
+            )
+        } else {
+            @Suppress("DEPRECATION")
+            pm.queryIntentActivities(intent, android.content.pm.PackageManager.MATCH_ALL)
+        }
         resolved
             .mapNotNull { info ->
                 val pkg = info.activityInfo?.packageName ?: return@mapNotNull null

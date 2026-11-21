@@ -70,6 +70,7 @@ import com.axion.ultimatefetcher.ui.components.KeyValueRow
 import com.axion.ultimatefetcher.ui.components.LivePulseIndicator
 import com.axion.ultimatefetcher.ui.components.LiveTrafficChart
 import com.axion.ultimatefetcher.ui.components.MetricTile
+import com.axion.ultimatefetcher.ui.components.VpnDiagnosticsPanel
 import com.axion.ultimatefetcher.ui.theme.JetBrainsMonoFamily
 import com.axion.ultimatefetcher.ui.theme.LocalCyberColors
 import com.axion.ultimatefetcher.utils.FormatUtils
@@ -94,6 +95,8 @@ fun DashboardScreen(
     ) { result ->
         if (result.resultCode == Activity.RESULT_OK) {
             viewModel.startVpnMonitoring(context)
+        } else {
+            viewModel.reportVpnPermissionDenied()
         }
     }
 
@@ -151,10 +154,17 @@ fun DashboardScreen(
                             color = cs.onSurfaceVariant
                         )
                     }
+                    val heroLabel = when {
+                        vpnState.isActivelyCapturing && vpnState.packetsSavedToDb > 0L -> "CAPTURING"
+                        vpnState.vpnInterfaceEstablished -> "VPN WAITING (0 PKTS)"
+                        vpnState.lastError != null && !vpnState.isRunning -> "VPN ERROR"
+                        telemetry.isConnected -> "ONLINE"
+                        else -> "OFFLINE"
+                    }
                     LivePulseIndicator(
-                        isActive = vpnState.isRunning || telemetry.isConnected,
-                        activeLabel = if (vpnState.isRunning) "VPN LIVE" else "ONLINE",
-                        inactiveLabel = "OFFLINE"
+                        isActive = vpnState.isActivelyCapturing || (!vpnState.isRunning && telemetry.isConnected && vpnState.lastError == null),
+                        activeLabel = heroLabel,
+                        inactiveLabel = heroLabel
                     )
                 }
             }
@@ -380,6 +390,14 @@ fun DashboardScreen(
                 }
             }
 
+            // Live Capture Pipeline Diagnostics Panel
+            item {
+                VpnDiagnosticsPanel(
+                    vpnState = vpnState,
+                    modifier = Modifier.testTag("dashboard_vpn_diagnostics")
+                )
+            }
+
             // Interface, DNS & VPN Details Card
             item {
                 CyberGlassCard {
@@ -400,10 +418,29 @@ fun DashboardScreen(
                     KeyValueRow("DNS Privacy", telemetry.privateDnsMode)
                     KeyValueRow(
                         "Local VPN Monitor",
-                        if (vpnState.isRunning) "Active (TUN 10.215.173.1)" else if (telemetry.vpnSystemActive) "External VPN Active" else "Inactive",
-                        valueColor = if (vpnState.isRunning) cyber.success else cs.onSurfaceVariant
+                        when {
+                            vpnState.isActivelyCapturing -> "Capturing (${vpnState.packetsSavedToDb} saved)"
+                            vpnState.vpnInterfaceEstablished -> "Connected (IPv4+IPv6 TUN • 0 pkts yet)"
+                            vpnState.lastError != null -> "Error: ${vpnState.lastError}"
+                            telemetry.vpnSystemActive -> "External VPN Active"
+                            else -> "Inactive"
+                        },
+                        valueColor = when {
+                            vpnState.isActivelyCapturing -> cyber.success
+                            vpnState.vpnInterfaceEstablished -> cyber.warning
+                            vpnState.lastError != null -> cs.error
+                            else -> cs.onSurfaceVariant
+                        }
                     )
-                    KeyValueRow("App Filter Scope", settings.selectedAppName)
+                    KeyValueRow(
+                        "Selected App(s)",
+                        if (settings.selectedAppPackages.isEmpty()) {
+                            "All Launchable Apps"
+                        } else {
+                            "${settings.selectedAppNames.joinToString(", ")} (${settings.selectedAppPackages.size})"
+                        },
+                        valueColor = if (settings.selectedAppPackages.isNotEmpty()) cyber.cyan else cs.onSurface
+                    )
                 }
             }
 

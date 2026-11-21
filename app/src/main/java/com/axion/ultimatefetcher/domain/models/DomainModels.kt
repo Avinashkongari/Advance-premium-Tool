@@ -2,6 +2,13 @@ package com.axion.ultimatefetcher.domain.models
 
 import android.graphics.drawable.Drawable
 
+enum class PipelineStageStatus(val label: String) {
+    IDLE("Idle"),
+    WAITING("Waiting"),
+    ACTIVE("Active"),
+    ERROR("Error")
+}
+
 data class TrafficSample(
     val timestamp: Long = System.currentTimeMillis(),
     val downloadBps: Long = 0L,
@@ -24,7 +31,9 @@ data class LiveNetworkTelemetry(
     val totalPackets: Long = 0L,
     val tcpPackets: Long = 0L,
     val udpPackets: Long = 0L,
+    val dnsPackets: Long = 0L,
     val quicBlockedPackets: Long = 0L,
+    val packetsSavedToDb: Long = 0L,
     val publicIp: String? = null,
     val publicIpLoading: Boolean = false,
     val publicIpError: String? = null,
@@ -33,16 +42,45 @@ data class LiveNetworkTelemetry(
 
 data class VpnLiveState(
     val isRunning: Boolean = false,
+    val vpnInterfaceEstablished: Boolean = false,
+    val vpnConnectedState: PipelineStageStatus = PipelineStageStatus.IDLE,
+    val packetReadingState: PipelineStageStatus = PipelineStageStatus.IDLE,
+    val packetProcessingState: PipelineStageStatus = PipelineStageStatus.IDLE,
+    val databaseSavingState: PipelineStageStatus = PipelineStageStatus.IDLE,
     val statusMessage: String = "Stopped",
+    val lastError: String? = null,
+    val packetsRead: Long = 0L,
+    val packetsParsed: Long = 0L,
+    val packetsRejected: Long = 0L,
     val totalPackets: Long = 0L,
     val tcpPackets: Long = 0L,
     val udpPackets: Long = 0L,
+    val dnsPackets: Long = 0L,
     val quicPackets: Long = 0L,
     val blockedQuicPackets: Long = 0L,
+    val packetsSavedToDb: Long = 0L,
+    val dbInsertErrors: Long = 0L,
+    val lastDbError: String? = null,
+    val lastPacketTimestamp: Long = 0L,
     val capturedBytes: Long = 0L,
-    val targetAppPackage: String = "",
+    val selectedAppPackages: List<String> = emptyList(),
+    val selectedAppNames: List<String> = emptyList(),
+    val unavailablePackages: List<String> = emptyList(),
     val quicBlockingEnabled: Boolean = false
-)
+) {
+    val targetAppPackage: String
+        get() = selectedAppPackages.joinToString(", ")
+
+    val isActivelyCapturing: Boolean
+        get() = isRunning && vpnInterfaceEstablished && packetsRead > 0L
+
+    val selectedAppsSummary: String
+        get() = when {
+            selectedAppNames.isNotEmpty() -> selectedAppNames.joinToString(", ")
+            selectedAppPackages.isNotEmpty() -> selectedAppPackages.joinToString(", ")
+            else -> "All Launchable Apps"
+        }
+}
 
 data class InstalledAppInfo(
     val packageName: String,

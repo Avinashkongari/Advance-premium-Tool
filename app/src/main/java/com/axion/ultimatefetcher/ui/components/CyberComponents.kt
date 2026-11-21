@@ -461,3 +461,129 @@ fun highlightJson(json: String): AnnotatedString {
         }
     }
 }
+
+@Composable
+fun VpnDiagnosticsPanel(
+    vpnState: com.axion.ultimatefetcher.domain.models.VpnLiveState,
+    modifier: Modifier = Modifier
+) {
+    val cyber = LocalCyberColors.current
+    val cs = MaterialTheme.colorScheme
+
+    @Composable
+    fun stageColor(status: com.axion.ultimatefetcher.domain.models.PipelineStageStatus): Color = when (status) {
+        com.axion.ultimatefetcher.domain.models.PipelineStageStatus.ACTIVE -> cyber.success
+        com.axion.ultimatefetcher.domain.models.PipelineStageStatus.WAITING -> cyber.warning
+        com.axion.ultimatefetcher.domain.models.PipelineStageStatus.ERROR -> cs.error
+        com.axion.ultimatefetcher.domain.models.PipelineStageStatus.IDLE -> cs.onSurfaceVariant
+    }
+
+    CyberGlassCard(
+        modifier = modifier,
+        accentGlow = when {
+            vpnState.lastError != null || vpnState.dbInsertErrors > 0L -> cs.error
+            vpnState.isActivelyCapturing -> cyber.success
+            vpnState.vpnInterfaceEstablished -> cyber.warning
+            else -> null
+        }
+    ) {
+        CyberSectionHeader(
+            title = "Live Capture Diagnostics",
+            subtitle = vpnState.statusMessage
+        )
+        Spacer(Modifier.height(10.dp))
+
+        // 4 Separate Pipeline Stage States
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            PipelineStageBadge("VPN Conn", vpnState.vpnConnectedState.label, stageColor(vpnState.vpnConnectedState), Modifier.weight(1f))
+            PipelineStageBadge("Reading", vpnState.packetReadingState.label, stageColor(vpnState.packetReadingState), Modifier.weight(1f))
+            PipelineStageBadge("Processing", vpnState.packetProcessingState.label, stageColor(vpnState.packetProcessingState), Modifier.weight(1f))
+            PipelineStageBadge("DB Saving", vpnState.databaseSavingState.label, stageColor(vpnState.databaseSavingState), Modifier.weight(1f))
+        }
+
+        if (vpnState.lastError != null) {
+            Spacer(Modifier.height(8.dp))
+            InfoCalloutBanner(
+                title = "VPN Configuration / Runtime Warning",
+                message = vpnState.lastError,
+                accentColor = cs.error
+            )
+        }
+
+        if (vpnState.lastDbError != null) {
+            Spacer(Modifier.height(8.dp))
+            InfoCalloutBanner(
+                title = "Database Insert Error",
+                message = vpnState.lastDbError,
+                accentColor = cs.error
+            )
+        }
+
+        Spacer(Modifier.height(10.dp))
+        KeyValueRow(
+            "VPN Interface Established",
+            if (vpnState.vpnInterfaceEstablished) "Yes (IPv4 + IPv6 TUN)" else "No",
+            valueColor = if (vpnState.vpnInterfaceEstablished) cyber.success else cs.onSurfaceVariant
+        )
+        KeyValueRow("Selected App Scope", vpnState.selectedAppsSummary)
+        KeyValueRow("Packets Read", vpnState.packetsRead.toString(), valueColor = cyber.cyan)
+        KeyValueRow("Packets Parsed", vpnState.packetsParsed.toString(), valueColor = cs.onSurface)
+        KeyValueRow("TCP / UDP / DNS Packets", "${vpnState.tcpPackets} / ${vpnState.udpPackets} / ${vpnState.dnsPackets}")
+        KeyValueRow(
+            "Packets Saved to Database",
+            vpnState.packetsSavedToDb.toString(),
+            valueColor = if (vpnState.packetsSavedToDb > 0L) cyber.success else cs.onSurfaceVariant
+        )
+        KeyValueRow(
+            "Packets Rejected (Malformed)",
+            vpnState.packetsRejected.toString(),
+            valueColor = if (vpnState.packetsRejected > 0L) cyber.warning else cs.onSurfaceVariant
+        )
+        KeyValueRow(
+            "Last Packet Timestamp",
+            if (vpnState.lastPacketTimestamp > 0L) FormatUtils.formatDateTime(vpnState.lastPacketTimestamp) else "None yet"
+        )
+        KeyValueRow(
+            "Database Insert Errors",
+            vpnState.dbInsertErrors.toString(),
+            valueColor = if (vpnState.dbInsertErrors > 0L) cs.error else cyber.success
+        )
+    }
+}
+
+@Composable
+private fun PipelineStageBadge(
+    title: String,
+    status: String,
+    color: Color,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier = modifier
+            .clip(RoundedCornerShape(10.dp))
+            .background(color.copy(alpha = 0.14f))
+            .padding(horizontal = 6.dp, vertical = 7.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text(
+            text = title,
+            style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+        Spacer(Modifier.height(2.dp))
+        Text(
+            text = status,
+            style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp),
+            color = color,
+            fontWeight = FontWeight.Bold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
+}
+
