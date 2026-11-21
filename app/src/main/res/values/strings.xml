@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">UltimateFetcher</string>
+    <string name="vpn_notification_channel_name">Local Network Monitor</string>
+    <string name="vpn_notification_channel_desc">Active local VPN packet metadata monitor status</string>
+    <string name="health_notification_channel_name">API Health Alerts</string>
+    <string name="health_notification_channel_desc">Local alerts when a monitored API endpoint becomes unreachable</string>
+</resources>

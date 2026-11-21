@@ -1,0 +1,8 @@
+{
+  "name": "UltimateFetcher",
+  "description": "Local-first Android network telemetry dashboard, non-root VPN packet & DNS/TLS inspector, API testing lab, diagnostics suite, and read-only root network utility.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
